@@ -24,7 +24,9 @@ func TestUDPSenderReplay_PreservesRTPFields(t *testing.T) {
 	}
 	defer senderConn.Close()
 
-	s := NewUDPSender(senderConn, receiver.LocalAddr())
+	store := &MediaDestinationStore{}
+	store.Set(MediaDestination{AudioAddr: receiver.LocalAddr().(*net.UDPAddr), State: MediaStateEarly})
+	s := NewUDPSender(senderConn, store)
 	pkt := pcapread.RTPPacket{
 		Payload:     []byte{0xde, 0xad, 0xbe, 0xef},
 		Sequence:    4321,
@@ -79,7 +81,7 @@ func TestUDPSenderReplay_PreservesRTPFields(t *testing.T) {
 		errCh <- nil
 	}()
 
-	err = s.Replay(context.Background(), []ScheduledPacket{{At: 0, Packet: pkt}})
+	err = s.Replay(context.Background(), []ScheduledPacket{{At: 0, MediaType: MediaTypeAudio, Packet: pkt}})
 	if err != nil {
 		t.Fatalf("replay returned error: %v", err)
 	}
@@ -95,25 +97,112 @@ func TestUDPSenderReplay_StopsOnContextCancel(t *testing.T) {
 		sleep: func(d time.Duration) {
 			time.Sleep(100 * time.Millisecond)
 		},
-		conn: &recordingConn{},
-		addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999},
+		conn:         &recordingConn{},
+		destinations: &MediaDestinationStore{},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := s.Replay(ctx, []ScheduledPacket{{At: time.Second, Packet: pcapread.RTPPacket{}}})
+	err := s.Replay(ctx, []ScheduledPacket{{At: time.Second, MediaType: MediaTypeAudio, Packet: pcapread.RTPPacket{}}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled, got %v", err)
 	}
 }
 
-type recordingConn struct{}
+func TestUDPSenderReplay_SkipsUntilDestinationAvailable(t *testing.T) {
+	conn := &recordingConn{}
+	store := &MediaDestinationStore{}
+	s := NewUDPSender(conn, store)
+	s.now = sequencedNow([]time.Time{time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0)})
+	s.sleep = func(time.Duration) {}
+
+	err := s.Replay(context.Background(), []ScheduledPacket{{At: 0, MediaType: MediaTypeAudio, Packet: pcapread.RTPPacket{Payload: []byte{1}}}})
+	if err != nil {
+		t.Fatalf("replay returned error: %v", err)
+	}
+	if len(conn.writes) != 0 {
+		t.Fatalf("expected no writes, got %d", len(conn.writes))
+	}
+}
+
+func TestUDPSenderReplay_SwitchesDestinationDuringReplay(t *testing.T) {
+	conn := &recordingConn{}
+	store := &MediaDestinationStore{}
+	a1 := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4000}
+	a2 := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5000}
+	store.Set(MediaDestination{AudioAddr: a1, State: MediaStateEarly})
+	s := NewUDPSender(conn, store)
+	s.now = sequencedNow([]time.Time{
+		time.Unix(0, 0),
+		time.Unix(0, 0),
+		time.Unix(0, 0),
+		time.Unix(0, 0),
+		time.Unix(0, 0).Add(2 * time.Millisecond),
+	})
+	s.sleep = func(time.Duration) {
+		store.Set(MediaDestination{AudioAddr: a2, State: MediaStateFinal})
+	}
+
+	err := s.Replay(context.Background(), []ScheduledPacket{
+		{At: 0, MediaType: MediaTypeAudio, Packet: pcapread.RTPPacket{Payload: []byte{1}}},
+		{At: time.Millisecond, MediaType: MediaTypeAudio, Packet: pcapread.RTPPacket{Payload: []byte{2}}},
+	})
+	if err != nil {
+		t.Fatalf("replay returned error: %v", err)
+	}
+	if len(conn.writes) != 2 {
+		t.Fatalf("expected 2 writes, got %d", len(conn.writes))
+	}
+	if conn.writes[0].addr.String() != a1.String() {
+		t.Fatalf("first packet addr=%s want=%s", conn.writes[0].addr, a1)
+	}
+	if conn.writes[1].addr.String() != a2.String() {
+		t.Fatalf("second packet addr=%s want=%s", conn.writes[1].addr, a2)
+	}
+}
+
+func TestMediaDestinationStore_MultipleEarlyUpdates(t *testing.T) {
+	store := &MediaDestinationStore{}
+	first := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4000}
+	second := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5000}
+
+	store.Set(MediaDestination{AudioAddr: first, State: MediaStateEarly})
+	store.Set(MediaDestination{AudioAddr: second, State: MediaStateEarly})
+	got := store.Get()
+	if got.AudioAddr == nil || got.AudioAddr.String() != second.String() {
+		t.Fatalf("audio destination=%v want=%v", got.AudioAddr, second)
+	}
+}
+
+type writeRecord struct {
+	addr net.Addr
+	data []byte
+}
+
+type recordingConn struct{ writes []writeRecord }
 
 func (r *recordingConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) { return 0, nil, nil }
-func (r *recordingConn) WriteTo(p []byte, addr net.Addr) (n int, err error)  { return len(p), nil }
-func (r *recordingConn) Close() error                                        { return nil }
-func (r *recordingConn) LocalAddr() net.Addr                                 { return &net.UDPAddr{} }
-func (r *recordingConn) SetDeadline(t time.Time) error                       { return nil }
-func (r *recordingConn) SetReadDeadline(t time.Time) error                   { return nil }
-func (r *recordingConn) SetWriteDeadline(t time.Time) error                  { return nil }
+func (r *recordingConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	cp := make([]byte, len(p))
+	copy(cp, p)
+	r.writes = append(r.writes, writeRecord{addr: addr, data: cp})
+	return len(p), nil
+}
+func (r *recordingConn) Close() error                       { return nil }
+func (r *recordingConn) LocalAddr() net.Addr                { return &net.UDPAddr{} }
+func (r *recordingConn) SetDeadline(t time.Time) error      { return nil }
+func (r *recordingConn) SetReadDeadline(t time.Time) error  { return nil }
+func (r *recordingConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func sequencedNow(values []time.Time) func() time.Time {
+	idx := 0
+	return func() time.Time {
+		if idx >= len(values) {
+			return values[len(values)-1]
+		}
+		v := values[idx]
+		idx++
+		return v
+	}
+}

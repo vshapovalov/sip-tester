@@ -4,23 +4,67 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync"
 	"time"
 
 	"sip-tester/internal/pcapread"
 )
 
-type UDPSender struct {
-	conn  net.PacketConn
-	addr  net.Addr
-	now   func() time.Time
-	sleep func(time.Duration)
+type MediaState string
+
+const (
+	MediaStateEarly MediaState = "early"
+	MediaStateFinal MediaState = "final"
+)
+
+type MediaDestination struct {
+	AudioAddr *net.UDPAddr
+	VideoAddr *net.UDPAddr
+	State     MediaState
 }
 
-func NewUDPSender(conn net.PacketConn, addr net.Addr) *UDPSender {
+type MediaDestinationStore struct {
+	mu   sync.RWMutex
+	dest MediaDestination
+}
+
+func (s *MediaDestinationStore) Set(dest MediaDestination) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dest = copyMediaDestination(dest)
+}
+
+func (s *MediaDestinationStore) Get() MediaDestination {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return copyMediaDestination(s.dest)
+}
+
+func copyMediaDestination(dest MediaDestination) MediaDestination {
+	out := MediaDestination{State: dest.State}
+	if dest.AudioAddr != nil {
+		a := *dest.AudioAddr
+		out.AudioAddr = &a
+	}
+	if dest.VideoAddr != nil {
+		v := *dest.VideoAddr
+		out.VideoAddr = &v
+	}
+	return out
+}
+
+type UDPSender struct {
+	conn         net.PacketConn
+	destinations *MediaDestinationStore
+	now          func() time.Time
+	sleep        func(time.Duration)
+}
+
+func NewUDPSender(conn net.PacketConn, destinations *MediaDestinationStore) *UDPSender {
 	return &UDPSender{
-		conn: conn,
-		addr: addr,
-		now:  time.Now,
+		conn:         conn,
+		destinations: destinations,
+		now:          time.Now,
 		sleep: func(d time.Duration) {
 			time.Sleep(d)
 		},
@@ -43,12 +87,29 @@ func (s *UDPSender) Replay(ctx context.Context, schedule []ScheduledPacket) erro
 			return err
 		}
 
-		if _, err := s.conn.WriteTo(marshalRTP(item.Packet), s.addr); err != nil {
+		dest := s.destinations.Get()
+		addr := destinationForPacket(dest, item)
+		if addr == nil {
+			continue
+		}
+
+		if _, err := s.conn.WriteTo(marshalRTP(item.Packet), addr); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func destinationForPacket(dest MediaDestination, item ScheduledPacket) *net.UDPAddr {
+	switch item.MediaType {
+	case MediaTypeAudio:
+		return dest.AudioAddr
+	case MediaTypeVideo:
+		return dest.VideoAddr
+	default:
+		return nil
+	}
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration, sleep func(time.Duration)) error {

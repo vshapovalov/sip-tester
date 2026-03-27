@@ -25,12 +25,27 @@ The app runs this sequence:
 5. extract streams
 6. build SDP
 7. send INVITE
-8. receive 200 OK
-9. send ACK
-10. start RTP replay
-11. handle INFO
-12. send BYE
-13. exit
+8. handle provisional responses (100/180/183)
+9. if 183 has SDP, start early media RTP replay
+10. receive 200 OK
+11. send ACK
+12. apply final media destination from 200 OK SDP
+13. continue RTP replay (without restart) with final destination
+14. handle INFO
+15. send BYE
+16. exit
+
+## Early media support (183 Session Progress)
+
+`sip-tester` supports SIP early media and provisional response handling:
+
+- `100 Trying` and `180 Ringing` are logged and ignored.
+- `183 Session Progress` without SDP is logged and ignored.
+- `183` with SDP is parsed as an early media answer; RTP replay may start before call establishment.
+- Multiple `183` responses with SDP update the active media destination without restarting replay.
+- `200 OK` SDP applies final media destination; replay continues without schedule reset.
+- If no early SDP is received, replay starts after `ACK`.
+- `Require: 100rel` on provisional responses is rejected with `100rel/PRACK not supported`.
 
 
 ## SIP authentication

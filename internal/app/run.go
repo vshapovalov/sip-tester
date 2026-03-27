@@ -51,6 +51,11 @@ func Run(args []string) error {
 		return fmt.Errorf("extract streams: %w", err)
 	}
 
+	schedule := replay.BuildSchedule(audioStream, videoStream)
+	if len(schedule) == 0 {
+		return fmt.Errorf("no RTP packets scheduled")
+	}
+
 	logger.Println("build SDP")
 	rawInviteSDP, err := pcapread.FindFirstInviteWithSDP(packets)
 	if err != nil {
@@ -71,44 +76,61 @@ func Run(args []string) error {
 	}
 	defer client.Close()
 
+	rtpStore := &replay.MediaDestinationStore{}
+	replayController := newReplayController(logger, cfg.LocalIPParsed, schedule, rtpStore)
+
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStepTimeout)
 	defer cancel()
 
 	logger.Println("send INVITE")
-	inviteRes, err := client.SendInvite(ctx, cfg.Caller, cfg.Callee, offer)
+	inviteRes, err := client.SendInviteWithEarlyMedia(ctx, cfg.Caller, cfg.Callee, offer, func(answer sipclient.SDPAnswer) error {
+		logger.Println("early SDP detected (183 Session Progress)")
+		earlyDest, err := destinationFromAnswer(answer, replay.MediaStateEarly, false)
+		if err != nil {
+			return fmt.Errorf("183 SDP handling failed: %w", err)
+		}
+		rtpStore.Set(earlyDest)
+		logger.Printf("early media destination audio=%s video=%s", udpAddrString(earlyDest.AudioAddr), udpAddrString(earlyDest.VideoAddr))
+		if replayController.Start() {
+			logger.Println("early media started")
+		} else {
+			logger.Println("early destination updated")
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	logger.Println("receive 200 OK")
+	logger.Println("200 OK received")
 
 	logger.Println("send ACK")
 	if err := client.SendACK(cfg.Caller, inviteRes); err != nil {
 		return fmt.Errorf("send ACK: %w", err)
 	}
 
+	if !replayController.Started() {
+		logger.Println("start RTP replay")
+		replayController.Start()
+	}
+
+	finalDest, err := destinationFromAnswer(inviteRes.SDPAnswer, replay.MediaStateFinal, true)
+	if err != nil {
+		return fmt.Errorf("200 OK SDP handling failed: %w", err)
+	}
+	rtpStore.Set(finalDest)
+	logger.Printf("final destination applied audio=%s video=%s", udpAddrString(finalDest.AudioAddr), udpAddrString(finalDest.VideoAddr))
+
 	dialog := client.NewDialog(cfg.Caller, cfg.Callee, inviteRes)
-
-	rtpCtx, rtpCancel := context.WithCancel(context.Background())
-	defer rtpCancel()
-	var wg sync.WaitGroup
-
-	logger.Println("start RTP replay")
-	replayErrs := make(chan error, 2)
-	startReplay(rtpCtx, &wg, replayErrs, cfg.LocalIPParsed, inviteRes.SDPAnswer, audioStream, videoStream)
 
 	logger.Println("handle INFO")
 	infoCtx, infoCancel := context.WithCancel(context.Background())
 	go handleInfoLoop(infoCtx, logger, dialog)
 
-	wg.Wait()
+	replayController.Wait()
 	infoCancel()
 
-	select {
-	case err := <-replayErrs:
-		if err != nil {
-			return fmt.Errorf("RTP replay: %w", err)
-		}
-	default:
+	if err := replayController.Err(); err != nil {
+		return fmt.Errorf("RTP replay: %w", err)
 	}
 
 	byeCtx, byeCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
@@ -120,6 +142,75 @@ func Run(args []string) error {
 
 	logger.Println("exit")
 	return nil
+}
+
+type replayRunner struct {
+	logger   *log.Logger
+	localIP  net.IP
+	schedule []replay.ScheduledPacket
+	store    *replay.MediaDestinationStore
+	mu       sync.Mutex
+	started  bool
+	wg       sync.WaitGroup
+	err      error
+	errSet   bool
+}
+
+func newReplayController(logger *log.Logger, localIP net.IP, schedule []replay.ScheduledPacket, store *replay.MediaDestinationStore) *replayRunner {
+	return &replayRunner{logger: logger, localIP: localIP, schedule: schedule, store: store}
+}
+
+func (r *replayRunner) Start() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started {
+		return false
+	}
+	r.started = true
+	r.wg.Add(1)
+	go r.run()
+	return true
+}
+
+func (r *replayRunner) Started() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.started
+}
+
+func (r *replayRunner) Wait() { r.wg.Wait() }
+
+func (r *replayRunner) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
+}
+
+func (r *replayRunner) run() {
+	defer r.wg.Done()
+	r.logger.Println("replay started")
+	conn, err := net.ListenPacket("udp", net.JoinHostPort(r.localIP.String(), "0"))
+	if err != nil {
+		r.setErr(err)
+		return
+	}
+	defer conn.Close()
+
+	sender := replay.NewUDPSender(conn, r.store)
+	if err := sender.Replay(context.Background(), r.schedule); err != nil {
+		r.setErr(err)
+		return
+	}
+	r.logger.Println("replay finished")
+}
+
+func (r *replayRunner) setErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.errSet {
+		r.err = err
+		r.errSet = true
+	}
 }
 
 func resolveHost(host string) (string, error) {
@@ -156,45 +247,54 @@ func selectStreams(audioSSRC, videoSSRC *uint32, streams map[uint32][]pcapread.R
 	return audio, video, nil
 }
 
-func startReplay(ctx context.Context, wg *sync.WaitGroup, replayErrs chan<- error, localIP net.IP, answer sipclient.SDPAnswer, audio, video []pcapread.RTPPacket) {
+func destinationFromAnswer(answer sipclient.SDPAnswer, state replay.MediaState, enforceUsable bool) (replay.MediaDestination, error) {
+	dest := replay.MediaDestination{State: state}
 	for _, m := range answer.Media {
-		if m.Type == "audio" && len(audio) > 0 {
-			startReplayForMedia(ctx, wg, replayErrs, localIP, answer.ConnectionIP, m.Port, audio)
+		ip := m.ConnectionIP
+		if ip == "" {
+			ip = answer.ConnectionIP
 		}
-		if m.Type == "video" && len(video) > 0 {
-			startReplayForMedia(ctx, wg, replayErrs, localIP, answer.ConnectionIP, m.Port, video)
+		if ip == "" {
+			continue
+		}
+		switch m.Type {
+		case "audio":
+			if m.Port == 0 {
+				if state == replay.MediaStateFinal {
+					log.Printf("sip-tester: media disabled type=audio")
+				}
+				continue
+			}
+			addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", m.Port)))
+			if err != nil {
+				return replay.MediaDestination{}, err
+			}
+			dest.AudioAddr = addr
+		case "video":
+			if m.Port == 0 {
+				if state == replay.MediaStateFinal {
+					log.Printf("sip-tester: media disabled type=video")
+				}
+				continue
+			}
+			addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", m.Port)))
+			if err != nil {
+				return replay.MediaDestination{}, err
+			}
+			dest.VideoAddr = addr
 		}
 	}
+	if enforceUsable && dest.AudioAddr == nil && dest.VideoAddr == nil {
+		return replay.MediaDestination{}, fmt.Errorf("no usable media endpoints in SDP")
+	}
+	return dest, nil
 }
 
-func startReplayForMedia(ctx context.Context, wg *sync.WaitGroup, replayErrs chan<- error, localIP net.IP, remoteIP string, remotePort int, packets []pcapread.RTPPacket) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		schedule := replay.BuildSchedule(packets, nil)
-		if len(schedule) == 0 {
-			return
-		}
-
-		conn, err := net.ListenPacket("udp", net.JoinHostPort(localIP.String(), "0"))
-		if err != nil {
-			replayErrs <- err
-			return
-		}
-		defer conn.Close()
-
-		remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(remoteIP, fmt.Sprintf("%d", remotePort)))
-		if err != nil {
-			replayErrs <- err
-			return
-		}
-
-		sender := replay.NewUDPSender(conn, remoteAddr)
-		if err := sender.Replay(ctx, schedule); err != nil && !errors.Is(err, context.Canceled) {
-			replayErrs <- err
-		}
-	}()
+func udpAddrString(addr *net.UDPAddr) string {
+	if addr == nil {
+		return "disabled"
+	}
+	return addr.String()
 }
 
 func handleInfoLoop(ctx context.Context, logger *log.Logger, dialog *sipclient.Dialog) {
