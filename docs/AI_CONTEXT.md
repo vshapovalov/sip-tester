@@ -635,3 +635,25 @@ When modifying `sip-tester`, preserve these invariants unless intentionally rede
 6. **IPv4/IPv6 behavior remains explicit, bind-driven, and testable.**
 
 If a change violates any invariant, update this document and corresponding tests in the same change set.
+
+
+## SIP authentication (INVITE only)
+
+Digest authentication is optional and controlled by CLI credentials:
+
+- If both `--username` and `--password` are provided, `sip-tester` handles a single Digest challenge for the initial outbound `INVITE`.
+- Supported challenges:
+  - `401 Unauthorized` with `WWW-Authenticate`
+  - `407 Proxy Authentication Required` with `Proxy-Authenticate`
+- For successful challenge handling, `sip-tester` retries `INVITE` once with:
+  - `Authorization` for 401
+  - `Proxy-Authorization` for 407
+
+MVP limitations:
+
+- INVITE digest auth only (no REGISTER/BYE/ACK auth)
+- no cross-dialog auth caching
+- `algorithm=MD5` (or omitted algorithm) only
+- supports `qop=auth` or no `qop`
+- `qop=auth-int` is unsupported
+- no repeated auth loops beyond a single authenticated retry

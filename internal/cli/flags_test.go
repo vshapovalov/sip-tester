@@ -55,3 +55,21 @@ func TestValidationErrors(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestValidationErrorsCredentialsPair(t *testing.T) {
+	_, err := ParseArgs([]string{
+		"--caller", "1001",
+		"--callee", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.10",
+		"--pcap", "sample.pcap",
+		"--ssrc-audio", "287454020",
+		"--username", "1001",
+	})
+	if err == nil {
+		t.Fatal("expected credential pairing validation error")
+	}
+	if !strings.Contains(err.Error(), "--username and --password must be provided together") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
