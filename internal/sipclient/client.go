@@ -22,6 +22,11 @@ type Client struct {
 	cseq       int
 }
 
+type InviteResult struct {
+	ToHeader  string
+	SDPAnswer SDPAnswer
+}
+
 func NewClient(localIP net.IP, remoteHost string, remotePort uint16) (*Client, error) {
 	if localIP == nil {
 		return nil, fmt.Errorf("local IP is required")
@@ -57,6 +62,19 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Invite(ctx context.Context, fromURI, toURI, offerSDP string) (*Dialog, error) {
+	res, err := c.SendInvite(ctx, fromURI, toURI, offerSDP)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.SendACK(fromURI, toURI, res.ToHeader); err != nil {
+		return nil, fmt.Errorf("send ACK: %w", err)
+	}
+
+	return c.NewDialog(fromURI, toURI, res.ToHeader, res.SDPAnswer), nil
+}
+
+func (c *Client) SendInvite(ctx context.Context, fromURI, toURI, offerSDP string) (InviteResult, error) {
 	branch := "z9hG4bK-" + randomToken(9)
 	invite := &sip.Request{
 		Method: "INVITE",
@@ -75,34 +93,41 @@ func (c *Client) Invite(ctx context.Context, fromURI, toURI, offerSDP string) (*
 	}
 
 	if err := c.write(invite); err != nil {
-		return nil, fmt.Errorf("send INVITE: %w", err)
+		return InviteResult{}, fmt.Errorf("send INVITE: %w", err)
 	}
 
 	resp, err := c.waitForResponse(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("wait INVITE response: %w", err)
+		return InviteResult{}, fmt.Errorf("wait INVITE response: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("INVITE failed with %d %s", resp.StatusCode, resp.Reason)
+		return InviteResult{}, fmt.Errorf("INVITE failed with %d %s", resp.StatusCode, resp.Reason)
 	}
 
 	sdpAnswer, err := ParseSDPAnswer(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("parse SDP answer: %w", err)
+		return InviteResult{}, fmt.Errorf("parse SDP answer: %w", err)
 	}
 
-	if err := c.sendACK(fromURI, toURI, resp.Headers["To"]); err != nil {
-		return nil, fmt.Errorf("send ACK: %w", err)
-	}
+	return InviteResult{
+		ToHeader:  resp.Headers["To"],
+		SDPAnswer: sdpAnswer,
+	}, nil
+}
 
+func (c *Client) SendACK(fromURI, toURI, toHeader string) error {
+	return c.sendACK(fromURI, toURI, toHeader)
+}
+
+func (c *Client) NewDialog(fromURI, toURI, remoteTo string, sdpAnswer SDPAnswer) *Dialog {
 	d := &Dialog{
 		client:    c,
 		fromURI:   fromURI,
 		toURI:     toURI,
-		remoteTo:  resp.Headers["To"],
+		remoteTo:  remoteTo,
 		sdpAnswer: sdpAnswer,
 	}
-	return d, nil
+	return d
 }
 
 func (c *Client) sendACK(fromURI, toURI, toHeader string) error {
