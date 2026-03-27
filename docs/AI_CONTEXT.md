@@ -667,3 +667,16 @@ MVP limitations:
 - supports `qop=auth` or no `qop`
 - `qop=auth-int` is unsupported
 - no repeated auth loops beyond a single authenticated retry
+sip-tester now supports SIP provisional response handling and early media using `183 Session Progress` SDP answers.
+
+## Early Media Handling
+
+- `sip-tester` supports early media via `183 Session Progress`.
+- RTP replay may start before the call is established when a usable SDP is received in `183`.
+- Multiple `183` responses with SDP may update the media destination during replay.
+- The final `200 OK` SDP may override media endpoints, and sender destinations are switched dynamically at runtime.
+- RTP sender reads destination dynamically for every packet and can switch from EARLY to FINAL endpoints without restart.
+- Final SDP acceptance rules are honored (`m=audio 0` or `m=video 0` disables that media).
+- If no early SDP was received, replay starts only after ACK for `200 OK`.
+- `100rel/PRACK` is explicitly not supported; provisional responses requiring `100rel` fail with a clear error.
+- Early media is accepted from `183` only (not from `180`).

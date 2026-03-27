@@ -25,8 +25,14 @@ func TestBuildSchedule_MergesAndSortsByCaptureTime(t *testing.T) {
 	if got := schedule[0].Packet.Sequence; got != 9 {
 		t.Fatalf("packet 0 sequence = %d, want 9", got)
 	}
+	if got := schedule[0].MediaType; got != MediaTypeAudio {
+		t.Fatalf("packet 0 media type = %s, want %s", got, MediaTypeAudio)
+	}
 	if got := schedule[1].Packet.Sequence; got != 99 {
 		t.Fatalf("packet 1 sequence = %d, want 99", got)
+	}
+	if got := schedule[1].MediaType; got != MediaTypeVideo {
+		t.Fatalf("packet 1 media type = %s, want %s", got, MediaTypeVideo)
 	}
 	if got := schedule[2].Packet.Sequence; got != 10 {
 		t.Fatalf("packet 2 sequence = %d, want 10", got)

@@ -33,6 +33,8 @@ type InviteResult struct {
 	SDPAnswer    SDPAnswer
 }
 
+type EarlyMediaHandler func(SDPAnswer) error
+
 func NewClient(localIP net.IP, remoteHost string, remotePort uint16, username, password string) (*Client, error) {
 	if localIP == nil {
 		return nil, fmt.Errorf("local IP is required")
@@ -83,12 +85,20 @@ func (c *Client) Invite(ctx context.Context, fromURI, toURI, offerSDP string) (*
 }
 
 func (c *Client) SendInvite(ctx context.Context, fromURI, toURI, offerSDP string) (InviteResult, error) {
+	return c.sendInvite(ctx, fromURI, toURI, offerSDP, nil)
+}
+
+func (c *Client) SendInviteWithEarlyMedia(ctx context.Context, fromURI, toURI, offerSDP string, earlyHandler EarlyMediaHandler) (InviteResult, error) {
+	return c.sendInvite(ctx, fromURI, toURI, offerSDP, earlyHandler)
+}
+
+func (c *Client) sendInvite(ctx context.Context, fromURI, toURI, offerSDP string, earlyHandler EarlyMediaHandler) (InviteResult, error) {
 	invite := c.buildInvite(fromURI, toURI, offerSDP, nil)
 	if err := c.write(invite); err != nil {
 		return InviteResult{}, fmt.Errorf("send INVITE: %w", err)
 	}
 
-	resp, err := c.waitForResponse(ctx)
+	resp, err := c.waitForInviteResponse(ctx, earlyHandler)
 	if err != nil {
 		return InviteResult{}, fmt.Errorf("wait INVITE response: %w", err)
 	}
@@ -97,7 +107,7 @@ func (c *Client) SendInvite(ctx context.Context, fromURI, toURI, offerSDP string
 		if !c.hasCredentials() {
 			return InviteResult{}, fmt.Errorf("INVITE authentication required (%d) but --username/--password were not provided", resp.StatusCode)
 		}
-		return c.retryInviteWithAuth(ctx, fromURI, toURI, offerSDP, resp)
+		return c.retryInviteWithAuth(ctx, fromURI, toURI, offerSDP, resp, earlyHandler)
 	}
 	if resp.StatusCode != 200 {
 		return InviteResult{}, fmt.Errorf("INVITE failed with %d %s", resp.StatusCode, resp.Reason)
@@ -106,7 +116,7 @@ func (c *Client) SendInvite(ctx context.Context, fromURI, toURI, offerSDP string
 	return inviteResultFromResponse(resp)
 }
 
-func (c *Client) retryInviteWithAuth(ctx context.Context, fromURI, toURI, offerSDP string, challengeResp *sip.Response) (InviteResult, error) {
+func (c *Client) retryInviteWithAuth(ctx context.Context, fromURI, toURI, offerSDP string, challengeResp *sip.Response, earlyHandler EarlyMediaHandler) (InviteResult, error) {
 	log.Printf("sipclient: auth challenge received status=%d", challengeResp.StatusCode)
 	challenge, authHeaderName, err := parseDigestChallengeFromResponse(challengeResp)
 	if err != nil {
@@ -147,7 +157,7 @@ func (c *Client) retryInviteWithAuth(ctx context.Context, fromURI, toURI, offerS
 		return InviteResult{}, fmt.Errorf("send authenticated INVITE: %w", err)
 	}
 
-	resp, err := c.waitForResponse(ctx)
+	resp, err := c.waitForInviteResponse(ctx, earlyHandler)
 	if err != nil {
 		return InviteResult{}, fmt.Errorf("wait authenticated INVITE response: %w", err)
 	}
@@ -301,10 +311,7 @@ func (c *Client) waitForResponse(ctx context.Context) (*sip.Response, error) {
 			return nil, err
 		}
 		_, resp, err := sip.ParseMessage(buf[:n])
-		if err != nil {
-			continue
-		}
-		if resp == nil {
+		if err != nil || resp == nil {
 			continue
 		}
 		if resp.StatusCode >= 100 && resp.StatusCode < 200 {
@@ -312,6 +319,75 @@ func (c *Client) waitForResponse(ctx context.Context) (*sip.Response, error) {
 		}
 		return resp, nil
 	}
+}
+
+func (c *Client) waitForInviteResponse(ctx context.Context, earlyHandler EarlyMediaHandler) (*sip.Response, error) {
+	for {
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = c.conn.SetReadDeadline(deadline)
+		} else {
+			_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		}
+		buf := make([]byte, readBufferSize)
+		n, _, err := c.conn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				default:
+					return nil, fmt.Errorf("SIP response timeout")
+				}
+			}
+			return nil, err
+		}
+		_, resp, err := sip.ParseMessage(buf[:n])
+		if err != nil {
+			continue
+		}
+		if resp == nil {
+			continue
+		}
+		if resp.StatusCode >= 100 && resp.StatusCode < 200 {
+			if require100Rel(resp.Headers["Require"]) {
+				return nil, fmt.Errorf("100rel/PRACK not supported")
+			}
+			switch resp.StatusCode {
+			case 100:
+				log.Printf("sipclient: received 100 Trying")
+			case 180:
+				log.Printf("sipclient: received 180 Ringing")
+			case 183:
+				log.Printf("sipclient: received 183 Session Progress")
+				if strings.TrimSpace(resp.Body) == "" {
+					log.Printf("sipclient: 183 has no SDP, continuing")
+					continue
+				}
+				sdpAnswer, err := ParseSDPAnswer(resp.Body)
+				if err != nil {
+					return nil, fmt.Errorf("parse SDP in 183: %w", err)
+				}
+				if earlyHandler != nil {
+					if err := earlyHandler(sdpAnswer); err != nil {
+						return nil, err
+					}
+				}
+			default:
+				log.Printf("sipclient: received provisional %d %s", resp.StatusCode, resp.Reason)
+			}
+			continue
+		}
+		return resp, nil
+	}
+}
+
+func require100Rel(rawRequire string) bool {
+	for _, item := range strings.Split(rawRequire, ",") {
+		if strings.EqualFold(strings.TrimSpace(item), "100rel") {
+			return true
+		}
+	}
+	return false
 }
 
 func randomToken(n int) string {

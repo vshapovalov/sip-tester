@@ -17,12 +17,13 @@ type SDPAnswer struct {
 }
 
 type SDPMedia struct {
-	Type     string
-	Port     int
-	Protocol string
-	Formats  []string
-	RTPMap   map[string]string
-	FMTP     map[string]string
+	Type         string
+	Port         int
+	ConnectionIP string
+	Protocol     string
+	Formats      []string
+	RTPMap       map[string]string
+	FMTP         map[string]string
 }
 
 func ParseSDPAnswer(raw string) (SDPAnswer, error) {
@@ -39,7 +40,11 @@ func ParseSDPAnswer(raw string) (SDPAnswer, error) {
 		case strings.HasPrefix(line, "c="):
 			fields := strings.Fields(strings.TrimPrefix(line, "c="))
 			if len(fields) >= 3 {
-				answer.ConnectionIP = fields[2]
+				if len(answer.Media) == 0 {
+					answer.ConnectionIP = fields[2]
+				} else {
+					answer.Media[len(answer.Media)-1].ConnectionIP = fields[2]
+				}
 			}
 		case strings.HasPrefix(line, "m="):
 			m, err := parseSDPMediaLine(strings.TrimPrefix(line, "m="))
