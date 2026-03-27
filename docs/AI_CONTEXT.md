@@ -268,26 +268,36 @@ Example:
 - Wait for final non-1xx response (expects 200 OK).
 - Parse answer SDP.
 - Send ACK.
-- Keep minimal dialog state: call-id, local tag, cseq, remote To.
+- Build and persist dialog routing state from `200 OK` to `INVITE`:
+  - `Call-ID`,
+  - local `From` tag,
+  - remote `To` tag,
+  - remote target from `Contact`,
+  - route set from `Record-Route` (UAC route-set order),
+  - local CSeq progression.
 - During replay, listen for INFO and answer 200 OK.
 - Send BYE at end and require 200 OK.
 
 ### INFO handling
 
-- Incoming INFO is accepted regardless of payload semantics.
+- Incoming INFO is matched to the active dialog using `Call-ID` and tags.
 - Response is always `200 OK` for parsed INFO requests.
 - Useful for systems that send mid-call telemetry/control INFO.
 
 ### ACK and BYE
 
 - ACK is sent after successful 200 INVITE response.
+- ACK Request-URI targets remote target (`Contact` from 200 OK), and includes dialog `Route` header(s) when route set exists.
+- BYE is sent as an in-dialog request with Request-URI set to remote target and route set applied via `Route` header(s).
 - BYE increments CSeq and waits for 200 response.
 
 ### Request-URI vs From/To logic
 
-- Request-URI for INVITE/ACK/BYE/INFO uses normalized `toURI` (callee URI).
+- Request-URI for initial INVITE uses normalized `toURI` (callee URI).
+- Request-URI for in-dialog ACK/BYE/INFO uses remote target from `Contact` in the `200 OK` to INVITE.
 - `From` uses normalized caller URI plus generated local tag.
 - `To` on initial INVITE uses callee URI; in-dialog requests reuse remote `To` header returned by 200 OK.
+- When `Record-Route` is present in the 200 OK to INVITE, in-dialog requests include corresponding `Route` headers from stored route set.
 
 ---
 

@@ -82,11 +82,11 @@ func Run(args []string) error {
 	logger.Println("receive 200 OK")
 
 	logger.Println("send ACK")
-	if err := client.SendACK(cfg.Caller, cfg.Callee, inviteRes.ToHeader); err != nil {
+	if err := client.SendACK(cfg.Caller, inviteRes); err != nil {
 		return fmt.Errorf("send ACK: %w", err)
 	}
 
-	dialog := client.NewDialog(cfg.Caller, cfg.Callee, inviteRes.ToHeader, inviteRes.SDPAnswer)
+	dialog := client.NewDialog(cfg.Caller, cfg.Callee, inviteRes)
 
 	rtpCtx, rtpCancel := context.WithCancel(context.Background())
 	defer rtpCancel()

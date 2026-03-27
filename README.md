@@ -62,3 +62,21 @@ sip-tester \
   --username 1001 \
   --password secret
 ```
+
+## Proxy-routed SIP dialog support
+
+`sip-tester` supports dialog routing through common SIP proxy deployments (for example Kamailio/OpenSIPS-style Record-Route usage).
+
+Dialog behavior implemented by the client:
+
+- Initial `INVITE` includes generated `Via`, `Call-ID`, local `From` tag, `To` without tag, and `CSeq: 1 INVITE`.
+- On `200 OK` to `INVITE`, the client stores:
+  - remote target from `Contact` (used as Request-URI for in-dialog requests),
+  - remote tag from `To`,
+  - route set from `Record-Route` (UAC dialog order),
+  - dialog identifiers (`Call-ID`, local tag, remote tag) and local CSeq progression.
+- `ACK` for `2xx` and `BYE` are sent using dialog state:
+  - Request-URI = remote target (`Contact` from `200 OK`),
+  - `Route` header(s) derived from stored route set when present,
+  - same dialog identifiers and correct CSeq handling.
+- Incoming in-dialog `INFO` is matched by `Call-ID` and tags, then replied with `200 OK`.
