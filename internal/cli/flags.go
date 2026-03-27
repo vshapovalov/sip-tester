@@ -23,6 +23,8 @@ func ParseArgs(args []string) (*config.Config, error) {
 	fs.StringVar(&cfg.SSRCAudioRaw, "ssrc-audio", "", "audio SSRC (decimal or hex, e.g. 0x11223344)")
 	fs.StringVar(&cfg.SSRCVideoRaw, "ssrc-video", "", "video SSRC (decimal or hex, e.g. 0x11223344)")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug output")
+	fs.StringVar(&cfg.Username, "username", "", "SIP digest auth username")
+	fs.StringVar(&cfg.Password, "password", "", "SIP digest auth password")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

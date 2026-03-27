@@ -65,7 +65,7 @@ func Run(args []string) error {
 		return fmt.Errorf("build SDP offer: %w", err)
 	}
 
-	client, err := sipclient.NewClient(cfg.LocalIPParsed, resolvedHost, cfg.Port)
+	client, err := sipclient.NewClient(cfg.LocalIPParsed, resolvedHost, cfg.Port, cfg.Username, cfg.Password)
 	if err != nil {
 		return fmt.Errorf("create SIP client: %w", err)
 	}

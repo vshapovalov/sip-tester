@@ -15,6 +15,8 @@ type Config struct {
 	SSRCAudioRaw string
 	SSRCVideoRaw string
 	Debug        bool
+	Username     string
+	Password     string
 
 	Caller string
 	Callee string
@@ -46,6 +48,9 @@ func (c *Config) ValidateRequired() error {
 	}
 	if c.SSRCAudioRaw == "" && c.SSRCVideoRaw == "" {
 		return fmt.Errorf("at least one of --ssrc-audio or --ssrc-video must be provided")
+	}
+	if (c.Username == "") != (c.Password == "") {
+		return fmt.Errorf("--username and --password must be provided together")
 	}
 	return nil
 }
