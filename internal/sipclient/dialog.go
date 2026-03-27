@@ -3,17 +3,22 @@ package sipclient
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/emiago/sipgo/sip"
 )
 
 type Dialog struct {
-	client    *Client
-	fromURI   string
-	toURI     string
-	remoteTo  string
-	sdpAnswer SDPAnswer
+	client       *Client
+	fromURI      string
+	toURI        string
+	remoteTo     string
+	remoteTag    string
+	remoteTarget string
+	routeSet     []string
+	sdpAnswer    SDPAnswer
 }
 
 func (d *Dialog) SDPAnswer() SDPAnswer {
@@ -22,18 +27,8 @@ func (d *Dialog) SDPAnswer() SDPAnswer {
 
 func (d *Dialog) Bye(ctx context.Context) error {
 	d.client.cseq++
-	bye := &sip.Request{
-		Method: "BYE",
-		URI:    d.toURI,
-		Headers: map[string]string{
-			"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
-			"Max-Forwards": "70",
-			"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.client.localTag),
-			"To":           d.remoteTo,
-			"Call-ID":      d.client.callID,
-			"CSeq":         fmt.Sprintf("%d BYE", d.client.cseq),
-		},
-	}
+	bye := d.buildInDialogRequest("BYE", "")
+	log.Printf("sipclient: BYE destination request-uri=%s routes=%v", bye.URI, d.routeSet)
 	if err := d.client.write(bye); err != nil {
 		return fmt.Errorf("send BYE: %w", err)
 	}
@@ -50,20 +45,8 @@ func (d *Dialog) Bye(ctx context.Context) error {
 
 func (d *Dialog) Info(ctx context.Context, payload InfoPayload) error {
 	d.client.cseq++
-	info := &sip.Request{
-		Method: "INFO",
-		URI:    d.toURI,
-		Headers: map[string]string{
-			"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
-			"Max-Forwards": "70",
-			"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.client.localTag),
-			"To":           d.remoteTo,
-			"Call-ID":      d.client.callID,
-			"CSeq":         fmt.Sprintf("%d INFO", d.client.cseq),
-			"Content-Type": payload.ContentType,
-		},
-		Body: payload.Body,
-	}
+	info := d.buildInDialogRequest("INFO", payload.ContentType)
+	info.Body = payload.Body
 	if err := d.client.write(info); err != nil {
 		return fmt.Errorf("send INFO: %w", err)
 	}
@@ -97,6 +80,10 @@ func (d *Dialog) HandleIncomingINFO(ctx context.Context) (*InfoPayload, error) {
 	if req == nil || req.Method != "INFO" {
 		return nil, fmt.Errorf("expected incoming INFO")
 	}
+	if !d.matchesDialog(req.Headers["Call-ID"], req.Headers["From"], req.Headers["To"]) {
+		return nil, fmt.Errorf("incoming INFO did not match dialog")
+	}
+	log.Printf("sipclient: INFO matched to dialog call-id=%s", req.Headers["Call-ID"])
 
 	payload := &InfoPayload{
 		ContentType: req.Headers["Content-Type"],
@@ -120,4 +107,38 @@ func (d *Dialog) HandleIncomingINFO(ctx context.Context) (*InfoPayload, error) {
 	}
 
 	return payload, nil
+}
+
+func (d *Dialog) buildInDialogRequest(method, contentType string) *sip.Request {
+	headers := map[string]string{
+		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
+		"Max-Forwards": "70",
+		"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.client.localTag),
+		"To":           d.remoteTo,
+		"Call-ID":      d.client.callID,
+		"CSeq":         fmt.Sprintf("%d %s", d.client.cseq, method),
+	}
+	// SIP dialog routing for in-dialog requests:
+	// - Request-URI always targets the remote target from 200 OK Contact.
+	// - Route headers are populated from the dialog route set (Record-Route from 200 OK).
+	if len(d.routeSet) > 0 {
+		headers["Route"] = strings.Join(d.routeSet, ", ")
+	}
+	if contentType != "" {
+		headers["Content-Type"] = contentType
+	}
+	return &sip.Request{
+		Method:  method,
+		URI:     d.remoteTarget,
+		Headers: headers,
+	}
+}
+
+func (d *Dialog) matchesDialog(callID, fromHeader, toHeader string) bool {
+	if callID != d.client.callID {
+		return false
+	}
+	remoteFromTag := extractTag(fromHeader)
+	localToTag := extractTag(toHeader)
+	return remoteFromTag == d.remoteTag && localToTag == d.client.localTag
 }

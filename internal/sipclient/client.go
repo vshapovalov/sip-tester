@@ -26,8 +26,11 @@ type Client struct {
 }
 
 type InviteResult struct {
-	ToHeader  string
-	SDPAnswer SDPAnswer
+	ToHeader     string
+	RemoteTag    string
+	RemoteTarget string
+	RouteSet     []string
+	SDPAnswer    SDPAnswer
 }
 
 func NewClient(localIP net.IP, remoteHost string, remotePort uint16, username, password string) (*Client, error) {
@@ -72,11 +75,11 @@ func (c *Client) Invite(ctx context.Context, fromURI, toURI, offerSDP string) (*
 		return nil, err
 	}
 
-	if err := c.SendACK(fromURI, toURI, res.ToHeader); err != nil {
+	if err := c.SendACK(fromURI, res); err != nil {
 		return nil, fmt.Errorf("send ACK: %w", err)
 	}
 
-	return c.NewDialog(fromURI, toURI, res.ToHeader, res.SDPAnswer), nil
+	return c.NewDialog(fromURI, toURI, res), nil
 }
 
 func (c *Client) SendInvite(ctx context.Context, fromURI, toURI, offerSDP string) (InviteResult, error) {
@@ -192,7 +195,25 @@ func inviteResultFromResponse(resp *sip.Response) (InviteResult, error) {
 		return InviteResult{}, fmt.Errorf("parse SDP answer: %w", err)
 	}
 
-	return InviteResult{ToHeader: resp.Headers["To"], SDPAnswer: sdpAnswer}, nil
+	toHeader := resp.Headers["To"]
+	remoteTag := extractTag(toHeader)
+	remoteTarget, err := parseNameAddrTarget(resp.Headers["Contact"])
+	if err != nil {
+		return InviteResult{}, fmt.Errorf("parse Contact as remote target: %w", err)
+	}
+	routeSet := buildRouteSetForUAC(parseHeaderURIList(resp.Headers["Record-Route"]))
+
+	log.Printf("sipclient: dialog created call-id=%s local-tag=%s remote-tag=%s", resp.Headers["Call-ID"], extractTag(resp.Headers["From"]), remoteTag)
+	log.Printf("sipclient: remote target=%s", remoteTarget)
+	log.Printf("sipclient: route set=%v", routeSet)
+
+	return InviteResult{
+		ToHeader:     toHeader,
+		RemoteTag:    remoteTag,
+		RemoteTarget: remoteTarget,
+		RouteSet:     routeSet,
+		SDPAnswer:    sdpAnswer,
+	}, nil
 }
 
 func (c *Client) buildInvite(fromURI, toURI, offerSDP string, extraHeaders map[string]string) *sip.Request {
@@ -213,36 +234,44 @@ func (c *Client) buildInvite(fromURI, toURI, offerSDP string, extraHeaders map[s
 	return &sip.Request{Method: "INVITE", URI: toURI, Headers: headers, Body: offerSDP}
 }
 
-func (c *Client) SendACK(fromURI, toURI, toHeader string) error {
-	return c.sendACK(fromURI, toURI, toHeader)
+func (c *Client) SendACK(fromURI string, inviteRes InviteResult) error {
+	ack := c.buildACK(fromURI, inviteRes)
+	log.Printf("sipclient: ACK destination request-uri=%s routes=%v", ack.URI, inviteRes.RouteSet)
+	return c.write(ack)
 }
 
-func (c *Client) NewDialog(fromURI, toURI, remoteTo string, sdpAnswer SDPAnswer) *Dialog {
+func (c *Client) NewDialog(fromURI, toURI string, inviteRes InviteResult) *Dialog {
 	d := &Dialog{
-		client:    c,
-		fromURI:   fromURI,
-		toURI:     toURI,
-		remoteTo:  remoteTo,
-		sdpAnswer: sdpAnswer,
+		client:       c,
+		fromURI:      fromURI,
+		toURI:        toURI,
+		remoteTo:     inviteRes.ToHeader,
+		remoteTag:    inviteRes.RemoteTag,
+		remoteTarget: inviteRes.RemoteTarget,
+		routeSet:     append([]string(nil), inviteRes.RouteSet...),
+		sdpAnswer:    inviteRes.SDPAnswer,
 	}
 	return d
 }
 
-func (c *Client) sendACK(fromURI, toURI, toHeader string) error {
+func (c *Client) buildACK(fromURI string, inviteRes InviteResult) *sip.Request {
 	ack := &sip.Request{
 		Method: "ACK",
-		URI:    toURI,
+		URI:    inviteRes.RemoteTarget,
 		Headers: map[string]string{
 			"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", c.localAddr.String(), randomToken(9)),
 			"Max-Forwards": "70",
 			"From":         fmt.Sprintf("<%s>;tag=%s", fromURI, c.localTag),
-			"To":           toHeader,
+			"To":           inviteRes.ToHeader,
 			"Call-ID":      c.callID,
 			"CSeq":         fmt.Sprintf("%d ACK", c.cseq),
 			"Contact":      fmt.Sprintf("<%s>", fromURI),
 		},
 	}
-	return c.write(ack)
+	if len(inviteRes.RouteSet) > 0 {
+		ack.Headers["Route"] = strings.Join(inviteRes.RouteSet, ", ")
+	}
+	return ack
 }
 
 func (c *Client) write(req *sip.Request) error {
@@ -306,4 +335,50 @@ func extractTag(h string) string {
 
 func (c *Client) hasCredentials() bool {
 	return c.username != "" && c.password != ""
+}
+
+func buildRouteSetForUAC(recordRoutes []string) []string {
+	if len(recordRoutes) == 0 {
+		return nil
+	}
+	routeSet := make([]string, 0, len(recordRoutes))
+	for i := len(recordRoutes) - 1; i >= 0; i-- {
+		routeSet = append(routeSet, recordRoutes[i])
+	}
+	return routeSet
+}
+
+func parseHeaderURIList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	routes := make([]string, 0, len(parts))
+	for _, p := range parts {
+		route := strings.TrimSpace(p)
+		if route == "" {
+			continue
+		}
+		routes = append(routes, route)
+	}
+	return routes
+}
+
+func parseNameAddrTarget(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty header")
+	}
+	if lt := strings.IndexByte(raw, '<'); lt >= 0 {
+		gt := strings.IndexByte(raw[lt:], '>')
+		if gt < 0 {
+			return "", fmt.Errorf("malformed name-addr %q", raw)
+		}
+		return strings.TrimSpace(raw[lt+1 : lt+gt]), nil
+	}
+	if semi := strings.IndexByte(raw, ';'); semi >= 0 {
+		return strings.TrimSpace(raw[:semi]), nil
+	}
+	return raw, nil
 }
