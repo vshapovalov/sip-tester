@@ -26,7 +26,7 @@ func TestUDPSenderReplay_PreservesRTPFields(t *testing.T) {
 
 	store := &MediaDestinationStore{}
 	store.Set(MediaDestination{AudioAddr: receiver.LocalAddr().(*net.UDPAddr), State: MediaStateEarly})
-	s := NewUDPSender(senderConn, store)
+	s := NewUDPSender(senderConn, senderConn, store)
 	pkt := pcapread.RTPPacket{
 		Payload:     []byte{0xde, 0xad, 0xbe, 0xef},
 		Sequence:    4321,
@@ -97,7 +97,8 @@ func TestUDPSenderReplay_StopsOnContextCancel(t *testing.T) {
 		sleep: func(d time.Duration) {
 			time.Sleep(100 * time.Millisecond)
 		},
-		conn:         &recordingConn{},
+		audioConn:    &recordingConn{},
+		videoConn:    &recordingConn{},
 		destinations: &MediaDestinationStore{},
 	}
 
@@ -113,7 +114,7 @@ func TestUDPSenderReplay_StopsOnContextCancel(t *testing.T) {
 func TestUDPSenderReplay_SkipsUntilDestinationAvailable(t *testing.T) {
 	conn := &recordingConn{}
 	store := &MediaDestinationStore{}
-	s := NewUDPSender(conn, store)
+	s := NewUDPSender(conn, conn, store)
 	s.now = sequencedNow([]time.Time{time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0)})
 	s.sleep = func(time.Duration) {}
 
@@ -132,7 +133,7 @@ func TestUDPSenderReplay_SwitchesDestinationDuringReplay(t *testing.T) {
 	a1 := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4000}
 	a2 := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5000}
 	store.Set(MediaDestination{AudioAddr: a1, State: MediaStateEarly})
-	s := NewUDPSender(conn, store)
+	s := NewUDPSender(conn, conn, store)
 	s.now = sequencedNow([]time.Time{
 		time.Unix(0, 0),
 		time.Unix(0, 0),
@@ -204,5 +205,33 @@ func sequencedNow(values []time.Time) func() time.Time {
 		v := values[idx]
 		idx++
 		return v
+	}
+}
+
+func TestUDPSenderReplay_UsesSeparateAudioAndVideoSockets(t *testing.T) {
+	audioConn := &recordingConn{}
+	videoConn := &recordingConn{}
+	store := &MediaDestinationStore{}
+	store.Set(MediaDestination{
+		AudioAddr: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4000},
+		VideoAddr: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5000},
+		State:     MediaStateFinal,
+	})
+	s := NewUDPSender(audioConn, videoConn, store)
+	s.now = sequencedNow([]time.Time{time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0)})
+	s.sleep = func(time.Duration) {}
+
+	err := s.Replay(context.Background(), []ScheduledPacket{
+		{At: 0, MediaType: MediaTypeAudio, Packet: pcapread.RTPPacket{Payload: []byte{1}}},
+		{At: 0, MediaType: MediaTypeVideo, Packet: pcapread.RTPPacket{Payload: []byte{2}}},
+	})
+	if err != nil {
+		t.Fatalf("replay returned error: %v", err)
+	}
+	if len(audioConn.writes) != 1 {
+		t.Fatalf("expected 1 audio write, got %d", len(audioConn.writes))
+	}
+	if len(videoConn.writes) != 1 {
+		t.Fatalf("expected 1 video write, got %d", len(videoConn.writes))
 	}
 }

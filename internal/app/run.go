@@ -35,6 +35,11 @@ func Run(args []string) error {
 	logger.Printf("normalize URIs: caller=%s callee=%s", cfg.Caller, cfg.Callee)
 	logger.Printf("local-ip=%s family=%s", cfg.LocalIPParsed.String(), cfg.IPFamily)
 	logger.Printf("IP mode selected: %s", cfg.IPFamily)
+	network, err := netutil.UDPNetworkForFamily(cfg.IPFamily)
+	if err != nil {
+		return err
+	}
+	logger.Printf("selected media network=%s local_ip=%s family=%s", network, cfg.LocalIPParsed.String(), cfg.IPFamily)
 
 	logger.Printf("resolve SIP target: host=%s port=%d family=%s", cfg.Host, cfg.Port, cfg.IPFamily)
 	resolvedTarget, err := netutil.ResolveSIPTarget(cfg.Host, cfg.Port, cfg.IPFamily)
@@ -82,7 +87,17 @@ func Run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("parse INVITE SDP: %w", err)
 	}
-	offer, err := sdp.BuildOffer(cfg.LocalIPParsed, media)
+
+	audioConn, videoConn, audioPort, videoPort, err := replay.BindMediaSockets(network, cfg.LocalIPParsed)
+	if err != nil {
+		return fmt.Errorf("bind media sockets: %w", err)
+	}
+	defer audioConn.Close()
+	defer videoConn.Close()
+	logger.Printf("bound RTP audio socket: %s:%d", cfg.LocalIPParsed.String(), audioPort)
+	logger.Printf("bound RTP video socket: %s:%d", cfg.LocalIPParsed.String(), videoPort)
+
+	offer, err := sdp.BuildOffer(cfg.LocalIPParsed, audioPort, videoPort, media)
 	if err != nil {
 		return fmt.Errorf("build SDP offer: %w", err)
 	}
@@ -94,7 +109,7 @@ func Run(args []string) error {
 	defer client.Close()
 
 	rtpStore := &replay.MediaDestinationStore{}
-	replayController := newReplayController(logger, cfg.LocalIPParsed, cfg.IPFamily, schedule, rtpStore)
+	replayController := newReplayController(logger, schedule, rtpStore, audioConn, videoConn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStepTimeout)
 	defer cancel()
@@ -162,20 +177,20 @@ func Run(args []string) error {
 }
 
 type replayRunner struct {
-	logger   *log.Logger
-	localIP  net.IP
-	family   netutil.IPFamily
-	schedule []replay.ScheduledPacket
-	store    *replay.MediaDestinationStore
-	mu       sync.Mutex
-	started  bool
-	wg       sync.WaitGroup
-	err      error
-	errSet   bool
+	logger    *log.Logger
+	schedule  []replay.ScheduledPacket
+	store     *replay.MediaDestinationStore
+	audioConn net.PacketConn
+	videoConn net.PacketConn
+	mu        sync.Mutex
+	started   bool
+	wg        sync.WaitGroup
+	err       error
+	errSet    bool
 }
 
-func newReplayController(logger *log.Logger, localIP net.IP, family netutil.IPFamily, schedule []replay.ScheduledPacket, store *replay.MediaDestinationStore) *replayRunner {
-	return &replayRunner{logger: logger, localIP: localIP, family: family, schedule: schedule, store: store}
+func newReplayController(logger *log.Logger, schedule []replay.ScheduledPacket, store *replay.MediaDestinationStore, audioConn, videoConn net.PacketConn) *replayRunner {
+	return &replayRunner{logger: logger, schedule: schedule, store: store, audioConn: audioConn, videoConn: videoConn}
 }
 
 func (r *replayRunner) Start() bool {
@@ -207,19 +222,7 @@ func (r *replayRunner) Err() error {
 func (r *replayRunner) run() {
 	defer r.wg.Done()
 	r.logger.Println("replay started")
-	network, err := netutil.UDPNetworkForFamily(r.family)
-	if err != nil {
-		r.setErr(err)
-		return
-	}
-	conn, err := net.ListenPacket(network, net.JoinHostPort(r.localIP.String(), "0"))
-	if err != nil {
-		r.setErr(err)
-		return
-	}
-	defer conn.Close()
-
-	sender := replay.NewUDPSender(conn, r.store)
+	sender := replay.NewUDPSender(r.audioConn, r.videoConn, r.store)
 	if err := sender.Replay(context.Background(), r.schedule); err != nil {
 		r.setErr(err)
 		return
