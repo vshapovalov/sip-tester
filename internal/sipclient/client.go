@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/emiago/sipgo/sip"
+	"sip-tester/internal/netutil"
 )
 
 const readBufferSize = 64 * 1024
@@ -35,17 +36,21 @@ type InviteResult struct {
 
 type EarlyMediaHandler func(SDPAnswer) error
 
-func NewClient(localIP net.IP, remoteHost string, remotePort uint16, username, password string) (*Client, error) {
+func NewClient(localIP net.IP, family netutil.IPFamily, target netutil.ResolvedTarget, username, password string) (*Client, error) {
 	if localIP == nil {
 		return nil, fmt.Errorf("local IP is required")
 	}
-	remoteAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", remoteHost, remotePort))
+	network, err := netutil.UDPNetworkForFamily(family)
+	if err != nil {
+		return nil, err
+	}
+	remoteAddr, err := net.ResolveUDPAddr(network, target.RemoteAddr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve remote address: %w", err)
 	}
 
 	localAddr := &net.UDPAddr{IP: localIP, Port: 0}
-	conn, err := net.ListenUDP("udp", localAddr)
+	conn, err := net.ListenUDP(network, localAddr)
 	if err != nil {
 		return nil, fmt.Errorf("bind local UDP socket %s: %w", localIP.String(), err)
 	}

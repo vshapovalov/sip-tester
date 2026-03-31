@@ -7,10 +7,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
 	"sip-tester/internal/cli"
+	"sip-tester/internal/netutil"
 	"sip-tester/internal/pcapread"
 	"sip-tester/internal/replay"
 	"sip-tester/internal/sdp"
@@ -30,13 +32,15 @@ func Run(args []string) error {
 	}
 
 	logger.Printf("normalize URIs: caller=%s callee=%s", cfg.Caller, cfg.Callee)
+	logger.Printf("local-ip=%s family=%s", cfg.LocalIPParsed.String(), cfg.IPFamily)
+	logger.Printf("IP mode selected: %s", cfg.IPFamily)
 
-	logger.Printf("resolve host: %s", cfg.Host)
-	resolvedHost, err := resolveHost(cfg.Host)
+	logger.Printf("resolve SIP target: host=%s port=%d family=%s", cfg.Host, cfg.Port, cfg.IPFamily)
+	resolvedTarget, err := netutil.ResolveSIPTarget(cfg.Host, cfg.Port, cfg.IPFamily)
 	if err != nil {
-		return fmt.Errorf("resolve host: %w", err)
+		return fmt.Errorf("resolve SIP target: %w", err)
 	}
-	logger.Printf("resolved host %s -> %s", cfg.Host, resolvedHost)
+	logger.Printf("resolved SIP target host=%s selected_ip=%s remote_addr=%s", resolvedTarget.Hostname, resolvedTarget.RemoteIP.String(), resolvedTarget.RemoteAddr)
 
 	logger.Printf("load PCAP: %s", cfg.PCAP)
 	packets, linkType, err := pcapread.LoadPCAPWithLinkType(cfg.PCAP)
@@ -82,14 +86,14 @@ func Run(args []string) error {
 		return fmt.Errorf("build SDP offer: %w", err)
 	}
 
-	client, err := sipclient.NewClient(cfg.LocalIPParsed, resolvedHost, cfg.Port, cfg.Username, cfg.Password)
+	client, err := sipclient.NewClient(cfg.LocalIPParsed, cfg.IPFamily, resolvedTarget, cfg.Username, cfg.Password)
 	if err != nil {
 		return fmt.Errorf("create SIP client: %w", err)
 	}
 	defer client.Close()
 
 	rtpStore := &replay.MediaDestinationStore{}
-	replayController := newReplayController(logger, cfg.LocalIPParsed, schedule, rtpStore)
+	replayController := newReplayController(logger, cfg.LocalIPParsed, cfg.IPFamily, schedule, rtpStore)
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStepTimeout)
 	defer cancel()
@@ -97,7 +101,7 @@ func Run(args []string) error {
 	logger.Println("send INVITE")
 	inviteRes, err := client.SendInviteWithEarlyMedia(ctx, cfg.Caller, cfg.Callee, offer, func(answer sipclient.SDPAnswer) error {
 		logger.Println("early SDP detected (183 Session Progress)")
-		earlyDest, err := destinationFromAnswer(answer, replay.MediaStateEarly, false)
+		earlyDest, err := destinationFromAnswer(answer, cfg.IPFamily, replay.MediaStateEarly, false)
 		if err != nil {
 			return fmt.Errorf("183 SDP handling failed: %w", err)
 		}
@@ -125,7 +129,7 @@ func Run(args []string) error {
 		replayController.Start()
 	}
 
-	finalDest, err := destinationFromAnswer(inviteRes.SDPAnswer, replay.MediaStateFinal, true)
+	finalDest, err := destinationFromAnswer(inviteRes.SDPAnswer, cfg.IPFamily, replay.MediaStateFinal, true)
 	if err != nil {
 		return fmt.Errorf("200 OK SDP handling failed: %w", err)
 	}
@@ -159,6 +163,7 @@ func Run(args []string) error {
 type replayRunner struct {
 	logger   *log.Logger
 	localIP  net.IP
+	family   netutil.IPFamily
 	schedule []replay.ScheduledPacket
 	store    *replay.MediaDestinationStore
 	mu       sync.Mutex
@@ -168,8 +173,8 @@ type replayRunner struct {
 	errSet   bool
 }
 
-func newReplayController(logger *log.Logger, localIP net.IP, schedule []replay.ScheduledPacket, store *replay.MediaDestinationStore) *replayRunner {
-	return &replayRunner{logger: logger, localIP: localIP, schedule: schedule, store: store}
+func newReplayController(logger *log.Logger, localIP net.IP, family netutil.IPFamily, schedule []replay.ScheduledPacket, store *replay.MediaDestinationStore) *replayRunner {
+	return &replayRunner{logger: logger, localIP: localIP, family: family, schedule: schedule, store: store}
 }
 
 func (r *replayRunner) Start() bool {
@@ -201,7 +206,12 @@ func (r *replayRunner) Err() error {
 func (r *replayRunner) run() {
 	defer r.wg.Done()
 	r.logger.Println("replay started")
-	conn, err := net.ListenPacket("udp", net.JoinHostPort(r.localIP.String(), "0"))
+	network, err := netutil.UDPNetworkForFamily(r.family)
+	if err != nil {
+		r.setErr(err)
+		return
+	}
+	conn, err := net.ListenPacket(network, net.JoinHostPort(r.localIP.String(), "0"))
 	if err != nil {
 		r.setErr(err)
 		return
@@ -223,17 +233,6 @@ func (r *replayRunner) setErr(err error) {
 		r.err = err
 		r.errSet = true
 	}
-}
-
-func resolveHost(host string) (string, error) {
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return "", err
-	}
-	if len(ips) == 0 {
-		return "", fmt.Errorf("no IPs found for host")
-	}
-	return ips[0].String(), nil
 }
 
 func selectStreams(audioSSRC, videoSSRC *uint32, streams map[uint32][]pcapread.RTPPacket) ([]pcapread.RTPPacket, []pcapread.RTPPacket, error) {
@@ -259,8 +258,12 @@ func selectStreams(audioSSRC, videoSSRC *uint32, streams map[uint32][]pcapread.R
 	return audio, video, nil
 }
 
-func destinationFromAnswer(answer sipclient.SDPAnswer, state replay.MediaState, enforceUsable bool) (replay.MediaDestination, error) {
+func destinationFromAnswer(answer sipclient.SDPAnswer, family netutil.IPFamily, state replay.MediaState, enforceUsable bool) (replay.MediaDestination, error) {
 	dest := replay.MediaDestination{State: state}
+	network, err := netutil.UDPNetworkForFamily(family)
+	if err != nil {
+		return replay.MediaDestination{}, err
+	}
 	for _, m := range answer.Media {
 		ip := m.ConnectionIP
 		if ip == "" {
@@ -277,7 +280,7 @@ func destinationFromAnswer(answer sipclient.SDPAnswer, state replay.MediaState, 
 				}
 				continue
 			}
-			addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", m.Port)))
+			addr, err := parseAndValidateSDPAddr(family, network, ip, m.Port)
 			if err != nil {
 				return replay.MediaDestination{}, err
 			}
@@ -289,7 +292,7 @@ func destinationFromAnswer(answer sipclient.SDPAnswer, state replay.MediaState, 
 				}
 				continue
 			}
-			addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", m.Port)))
+			addr, err := parseAndValidateSDPAddr(family, network, ip, m.Port)
 			if err != nil {
 				return replay.MediaDestination{}, err
 			}
@@ -300,6 +303,22 @@ func destinationFromAnswer(answer sipclient.SDPAnswer, state replay.MediaState, 
 		return replay.MediaDestination{}, fmt.Errorf("no usable media endpoints in SDP")
 	}
 	return dest, nil
+}
+
+func parseAndValidateSDPAddr(family netutil.IPFamily, network, ip string, port int) (*net.UDPAddr, error) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return nil, fmt.Errorf("SDP remote media address is not a literal IP: %s", ip)
+	}
+	if !netutil.IsIPInFamily(parsed, family) {
+		if family == netutil.IPFamilyV4 {
+			log.Printf("sip-tester: rejecting SDP destination %s:%d due to family mismatch local-ip-family=%s", ip, port, family)
+			return nil, fmt.Errorf("local-ip family IPv4 is incompatible with SDP remote media address %s", ip)
+		}
+		log.Printf("sip-tester: rejecting SDP destination %s:%d due to family mismatch local-ip-family=%s", ip, port, family)
+		return nil, fmt.Errorf("local-ip family IPv6 is incompatible with SDP remote media address %s", ip)
+	}
+	return net.ResolveUDPAddr(network, net.JoinHostPort(parsed.String(), strconv.Itoa(port)))
 }
 
 func udpAddrString(addr *net.UDPAddr) string {

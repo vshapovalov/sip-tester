@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sip-tester/internal/pcapio"
 )
 
 func TestFindFirstInviteWithSDPFromTransportPayload(t *testing.T) {
@@ -35,20 +37,18 @@ func TestFindFirstInviteWithSDPFromTransportPayload(t *testing.T) {
 }
 
 func TestFindFirstInviteWithSDPAcrossConsecutivePacketsSameFlow(t *testing.T) {
-	dir := t.TempDir()
 	body := "v=0\r\nm=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
 	headers := "INVITE sip:bob@example.com SIP/2.0\r\nContent-Type: application/sdp\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n"
-	frame1 := buildEtherIPv4TCP(net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2), 5060, 5060, []byte(headers+body[:10]))
-	frame2 := buildEtherIPv4TCP(net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2), 5060, 5060, []byte(body[10:]))
-	path := filepath.Join(dir, "split-invite.pcap")
-	if err := writeClassicPCAP(path, 1, time.Unix(1, 0), frame1, frame2); err != nil {
-		t.Fatal(err)
+	pkts := []Packet{
+		{
+			Decoded: pcapio.DecodedPacket{IsTCP: true, Payload: []byte(headers + body[:10])},
+			Raw:     pcapio.Packet{Data: []byte(headers + body[:10])},
+		},
+		{
+			Raw: pcapio.Packet{Data: []byte(body[10:])},
+		},
 	}
 
-	pkts, err := LoadPCAP(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	sdp, err := FindFirstInviteWithSDP(pkts)
 	if err != nil {
 		t.Fatalf("FindFirstInviteWithSDP error = %v", err)
@@ -58,25 +58,50 @@ func TestFindFirstInviteWithSDPAcrossConsecutivePacketsSameFlow(t *testing.T) {
 	}
 }
 
-func TestFindFirstInviteWithSDPIgnoresDifferentFlowContinuation(t *testing.T) {
-	dir := t.TempDir()
-	headers := "INVITE sip:bob@example.com SIP/2.0\r\nContent-Type: application/sdp\r\nContent-Length: 20\r\n\r\n"
-	part1 := "v=0\r\nm=audio "
-	part2WrongFlow := "4000 RTP/AVP 0\r\n"
-	frame1 := buildEtherIPv4TCP(net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2), 5060, 5060, []byte(headers+part1))
-	frame2 := buildEtherIPv4TCP(net.IPv4(10, 0, 0, 9), net.IPv4(10, 0, 0, 10), 5070, 5070, []byte(part2WrongFlow))
-	path := filepath.Join(dir, "split-other-flow.pcap")
-	if err := writeClassicPCAP(path, 1, time.Unix(1, 0), frame1, frame2); err != nil {
-		t.Fatal(err)
+func TestFindFirstInviteWithSDPAcrossPacketsWithFragmentDecodeError(t *testing.T) {
+	body := "v=0\r\nm=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+	headers := "INVITE sip:bob@example.com SIP/2.0\r\nContent-Type: application/sdp\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n"
+	pkts := []Packet{
+		{
+			Decoded: pcapio.DecodedPacket{IsTCP: true, Payload: []byte(headers + body[:14])},
+			Raw:     pcapio.Packet{Data: []byte(headers + body[:14])},
+		},
+		{
+			Raw:       pcapio.Packet{Data: []byte(body[14:])},
+			DecodeErr: errors.New("ipv4 fragment offset unsupported"),
+		},
 	}
 
-	pkts, err := LoadPCAP(path)
+	sdp, err := FindFirstInviteWithSDP(pkts)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("FindFirstInviteWithSDP error = %v", err)
 	}
-	_, err = FindFirstInviteWithSDP(pkts)
-	if !errors.Is(err, ErrSDPNotFound) {
-		t.Fatalf("error = %v, want %v", err, ErrSDPNotFound)
+	if sdp != strings.TrimSpace(body) {
+		t.Fatalf("assembled sdp=%q want=%q", sdp, strings.TrimSpace(body))
+	}
+}
+
+func TestFindFirstInviteWithSDPUsesNextConsecutivePacketData(t *testing.T) {
+	headers := "INVITE sip:bob@example.com SIP/2.0\r\nContent-Type: application/sdp\r\nContent-Length: 20\r\n\r\n"
+	part1 := "v=0\r\nm=audio "
+	part2 := "4000 RTP/AVP 0\r\n\x00\x00\x00\x00"
+	pkts := []Packet{
+		{
+			Decoded: pcapio.DecodedPacket{IsTCP: true, Payload: []byte(headers + part1)},
+			Raw:     pcapio.Packet{Data: []byte(headers + part1)},
+		},
+		{
+			Raw: pcapio.Packet{Data: []byte(part2)},
+		},
+	}
+
+	sdp, err := FindFirstInviteWithSDP(pkts)
+	if err != nil {
+		t.Fatalf("FindFirstInviteWithSDP error = %v", err)
+	}
+	want := strings.TrimSpace((part1 + part2)[:20])
+	if sdp != want {
+		t.Fatalf("assembled sdp=%q want=%q", sdp, want)
 	}
 }
 

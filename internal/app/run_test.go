@@ -1,8 +1,10 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
+	"sip-tester/internal/netutil"
 	"sip-tester/internal/replay"
 	"sip-tester/internal/sipclient"
 )
@@ -11,7 +13,7 @@ func TestDestinationFromAnswer_EarlyAndFinalSwitch(t *testing.T) {
 	early, err := destinationFromAnswer(sipclient.SDPAnswer{
 		ConnectionIP: "192.0.2.10",
 		Media:        []sipclient.SDPMedia{{Type: "audio", Port: 4000}, {Type: "video", Port: 5000}},
-	}, replay.MediaStateEarly, true)
+	}, netutil.IPFamilyV4, replay.MediaStateEarly, true)
 	if err != nil {
 		t.Fatalf("early destination error: %v", err)
 	}
@@ -22,7 +24,7 @@ func TestDestinationFromAnswer_EarlyAndFinalSwitch(t *testing.T) {
 	final, err := destinationFromAnswer(sipclient.SDPAnswer{
 		ConnectionIP: "192.0.2.20",
 		Media:        []sipclient.SDPMedia{{Type: "audio", Port: 6000}, {Type: "video", Port: 7000}},
-	}, replay.MediaStateFinal, true)
+	}, netutil.IPFamilyV4, replay.MediaStateFinal, true)
 	if err != nil {
 		t.Fatalf("final destination error: %v", err)
 	}
@@ -38,7 +40,7 @@ func TestDestinationFromAnswer_DisablesMediaPortZeroOnFinal(t *testing.T) {
 	dest, err := destinationFromAnswer(sipclient.SDPAnswer{
 		ConnectionIP: "192.0.2.30",
 		Media:        []sipclient.SDPMedia{{Type: "audio", Port: 0}, {Type: "video", Port: 7002}},
-	}, replay.MediaStateFinal, true)
+	}, netutil.IPFamilyV4, replay.MediaStateFinal, true)
 	if err != nil {
 		t.Fatalf("destination error: %v", err)
 	}
@@ -54,8 +56,43 @@ func TestDestinationFromAnswer_NoUsableEndpoints(t *testing.T) {
 	_, err := destinationFromAnswer(sipclient.SDPAnswer{
 		ConnectionIP: "192.0.2.30",
 		Media:        []sipclient.SDPMedia{{Type: "audio", Port: 0}, {Type: "video", Port: 0}},
-	}, replay.MediaStateFinal, true)
+	}, netutil.IPFamilyV4, replay.MediaStateFinal, true)
 	if err == nil {
 		t.Fatalf("expected error for no usable endpoints")
+	}
+}
+
+func TestDestinationFromAnswer_FamilyValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		family    netutil.IPFamily
+		sdpIP     string
+		expectErr string
+	}{
+		{name: "ipv4 accepts ip4", family: netutil.IPFamilyV4, sdpIP: "192.0.2.10"},
+		{name: "ipv4 rejects ip6", family: netutil.IPFamilyV4, sdpIP: "2001:db8::1", expectErr: "local-ip family IPv4 is incompatible"},
+		{name: "ipv6 accepts ip6", family: netutil.IPFamilyV6, sdpIP: "2001:db8::1"},
+		{name: "ipv6 rejects ip4", family: netutil.IPFamilyV6, sdpIP: "192.0.2.10", expectErr: "local-ip family IPv6 is incompatible"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest, err := destinationFromAnswer(sipclient.SDPAnswer{
+				ConnectionIP: tt.sdpIP,
+				Media:        []sipclient.SDPMedia{{Type: "audio", Port: 4000}},
+			}, tt.family, replay.MediaStateFinal, true)
+			if tt.expectErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.expectErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.expectErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if dest.AudioAddr == nil {
+				t.Fatalf("expected audio destination")
+			}
+		})
 	}
 }
