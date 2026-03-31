@@ -6,18 +6,26 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
 // LoadPCAP reads an entire pcap file and decodes all packets.
 func LoadPCAP(path string) ([]gopacket.Packet, error) {
+	packets, _, err := LoadPCAPWithLinkType(path)
+	return packets, err
+}
+
+// LoadPCAPWithLinkType reads an entire pcap file and returns decoded packets plus the capture link type.
+func LoadPCAPWithLinkType(path string) ([]gopacket.Packet, layers.LinkType, error) {
 	handle, err := pcap.OpenOffline(path)
 	if err != nil {
-		return nil, fmt.Errorf("open pcap: %w", err)
+		return nil, 0, fmt.Errorf("cannot open pcap %q: %w", path, err)
 	}
 	defer handle.Close()
 
-	source := gopacket.NewPacketSource(handle, handle.LinkType())
+	linkType := handle.LinkType()
+	source := gopacket.NewPacketSource(handle, linkType)
 	packets := make([]gopacket.Packet, 0, 1024)
 
 	for {
@@ -26,12 +34,12 @@ func LoadPCAP(path string) ([]gopacket.Packet, error) {
 			if err == io.EOF {
 				break
 			}
-			return nil, fmt.Errorf("decode pcap packet: %w", err)
+			return nil, linkType, fmt.Errorf("cannot decode pcap packet: %w", err)
 		}
 		packets = append(packets, packet)
 	}
 
-	return packets, nil
+	return packets, linkType, nil
 }
 
 // CaptureDuration returns the wall-clock capture duration between first and last packet.

@@ -52,11 +52,11 @@ func FindFirstInviteWithSDP(packets []gopacket.Packet) (string, error) {
 }
 
 func transportPayload(packet gopacket.Packet) []byte {
-	if udp := packet.Layer(layers.LayerTypeUDP); udp != nil {
-		return udp.(*layers.UDP).Payload
+	if udp, ok := packet.TransportLayer().(*layers.UDP); ok {
+		return udp.Payload
 	}
-	if tcp := packet.Layer(layers.LayerTypeTCP); tcp != nil {
-		return tcp.(*layers.TCP).Payload
+	if tcp, ok := packet.TransportLayer().(*layers.TCP); ok {
+		return tcp.Payload
 	}
 	if app := packet.ApplicationLayer(); app != nil {
 		return app.Payload()

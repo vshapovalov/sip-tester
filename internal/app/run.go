@@ -39,13 +39,25 @@ func Run(args []string) error {
 	logger.Printf("resolved host %s -> %s", cfg.Host, resolvedHost)
 
 	logger.Printf("load PCAP: %s", cfg.PCAP)
-	packets, err := pcapread.LoadPCAP(cfg.PCAP)
+	packets, linkType, err := pcapread.LoadPCAPWithLinkType(cfg.PCAP)
 	if err != nil {
 		return fmt.Errorf("load PCAP: %w", err)
+	}
+	if cfg.Debug {
+		for _, line := range pcapread.BuildPacketDiagnostics(linkType, packets, 8) {
+			logger.Println(line)
+		}
 	}
 
 	logger.Println("extract streams")
 	streams := pcapread.ExtractRTPBySSRC(packets)
+	if len(streams) == 0 {
+		udpCount := pcapread.DecodableUDPCount(packets)
+		if udpCount == 0 {
+			return fmt.Errorf("extract streams: no decodable UDP packets found")
+		}
+		return fmt.Errorf("extract streams: no RTP packets found")
+	}
 	audioStream, videoStream, err := selectStreams(cfg.SSRCAudio, cfg.SSRCVideo, streams)
 	if err != nil {
 		return fmt.Errorf("extract streams: %w", err)

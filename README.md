@@ -95,3 +95,13 @@ Dialog behavior implemented by the client:
   - `Route` header(s) derived from stored route set when present,
   - same dialog identifiers and correct CSeq handling.
 - Incoming in-dialog `INFO` is matched by `Call-ID` and tags, then replied with `200 OK`.
+
+
+## PCAP decoding
+
+PCAP parsing uses the real [`github.com/google/gopacket`](https://github.com/google/gopacket) library and offline reader (`pcap.OpenOffline`).
+
+- Decode starts from the capture link type reported by `handle.LinkType()` (not hardcoded Ethernet).
+- RTP extraction uses decoded transport layers (`packet.TransportLayer()`) and reads RTP from UDP payload only.
+- In `--debug` mode, packet decoding diagnostics include link type, layer stack, decode errors, and network/transport layer presence.
+

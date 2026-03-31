@@ -27,12 +27,11 @@ type RTPPacket struct {
 func ExtractRTPBySSRC(packets []gopacket.Packet) map[uint32][]RTPPacket {
 	streams := map[uint32][]RTPPacket{}
 	for _, packet := range packets {
-		udpLayer := packet.Layer(layers.LayerTypeUDP)
-		if udpLayer == nil {
+		udp, ok := packet.TransportLayer().(*layers.UDP)
+		if !ok {
 			continue
 		}
 
-		udp := udpLayer.(*layers.UDP)
 		rtp, ok := parseRTPPacket(udp.Payload, packet.Metadata().CaptureInfo.Timestamp)
 		if !ok {
 			continue
@@ -47,6 +46,17 @@ func ExtractRTPBySSRC(packets []gopacket.Packet) map[uint32][]RTPPacket {
 	}
 
 	return streams
+}
+
+// DecodableUDPCount returns the number of packets that decoded a UDP transport layer.
+func DecodableUDPCount(packets []gopacket.Packet) int {
+	count := 0
+	for _, packet := range packets {
+		if _, ok := packet.TransportLayer().(*layers.UDP); ok {
+			count++
+		}
+	}
+	return count
 }
 
 // FilterSSRC keeps only requested SSRC streams and returns error when any requested SSRC is missing.
