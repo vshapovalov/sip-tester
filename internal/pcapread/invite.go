@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -21,25 +22,28 @@ type SDPMedia struct {
 }
 
 func FindFirstInviteWithSDP(packets []Packet) (string, error) {
-	for _, packet := range packets {
+	foundInvite := false
+	for i, packet := range packets {
 		payload := packet.Decoded.Payload
 		if len(payload) == 0 {
 			continue
 		}
-		sdp, invite, hasBody := parseInviteSDP(payload)
-		if invite && hasBody {
+		if !payloadStartsInvite(payload) {
+			continue
+		}
+		foundInvite = true
+
+		assembled, err := assembleSIPMessageFromPacket(i, packets)
+		if err != nil {
+			continue
+		}
+		sdp, invite, hasSDP := parseInviteSDP(assembled)
+		if invite && hasSDP {
 			return sdp, nil
 		}
 	}
-	for _, packet := range packets {
-		payload := packet.Decoded.Payload
-		if len(payload) == 0 {
-			continue
-		}
-		_, invite, _ := parseInviteSDP(payload)
-		if invite {
-			return "", ErrSDPNotFound
-		}
+	if foundInvite {
+		return "", ErrSDPNotFound
 	}
 	return "", ErrInviteNotFound
 }
@@ -62,6 +66,124 @@ func parseInviteSDP(payload []byte) (sdp string, isInvite bool, hasSDP bool) {
 		return "", true, false
 	}
 	return body, true, true
+}
+
+type sipMessageFraming struct {
+	HeaderComplete bool
+	HeaderLength   int
+	ContentLength  int
+	TotalLength    int
+}
+
+type packetFlowKey struct {
+	Protocol uint8
+	SrcIP    string
+	DstIP    string
+	SrcPort  uint16
+	DstPort  uint16
+}
+
+func assembleSIPMessageFromPacket(startIdx int, packets []Packet) ([]byte, error) {
+	if startIdx < 0 || startIdx >= len(packets) {
+		return nil, fmt.Errorf("invalid packet index %d", startIdx)
+	}
+	start := packets[startIdx]
+	startFlow, ok := flowKeyFromPacket(start)
+	if !ok {
+		return nil, fmt.Errorf("missing transport flow for packet index %d", startIdx)
+	}
+	assembled := append([]byte{}, start.Decoded.Payload...)
+
+	for i := startIdx; i < len(packets); i++ {
+		if i > startIdx {
+			nextFlow, ok := flowKeyFromPacket(packets[i])
+			if !ok || nextFlow != startFlow {
+				continue
+			}
+			assembled = append(assembled, packets[i].Decoded.Payload...)
+		}
+
+		framing, err := parseSIPMessageFraming(assembled)
+		if err != nil {
+			return nil, err
+		}
+		if !framing.HeaderComplete {
+			continue
+		}
+		if len(assembled) < framing.TotalLength {
+			continue
+		}
+		return assembled[:framing.TotalLength], nil
+	}
+	return nil, fmt.Errorf("incomplete SIP INVITE message while assembling from packet index %d", startIdx)
+}
+
+func parseSIPMessageFraming(payload []byte) (sipMessageFraming, error) {
+	headerEnd := bytes.Index(payload, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		return sipMessageFraming{HeaderComplete: false}, nil
+	}
+	headerLen := headerEnd + 4
+	headerText := string(payload[:headerEnd])
+	contentLen, err := parseContentLength(headerText)
+	if err != nil {
+		return sipMessageFraming{}, err
+	}
+	return sipMessageFraming{
+		HeaderComplete: true,
+		HeaderLength:   headerLen,
+		ContentLength:  contentLen,
+		TotalLength:    headerLen + contentLen,
+	}, nil
+}
+
+func parseContentLength(headers string) (int, error) {
+	for _, line := range strings.Split(headers, "\r\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(parts[0]), "Content-Length") {
+			continue
+		}
+		value := strings.TrimSpace(parts[1])
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("invalid Content-Length %q", value)
+		}
+		return n, nil
+	}
+	return 0, fmt.Errorf("missing Content-Length header")
+}
+
+func flowKeyFromPacket(packet Packet) (packetFlowKey, bool) {
+	if packet.DecodeErr != nil {
+		return packetFlowKey{}, false
+	}
+	if !packet.Decoded.IsTCP && !packet.Decoded.IsUDP {
+		return packetFlowKey{}, false
+	}
+	if len(packet.Decoded.SrcIP) == 0 || len(packet.Decoded.DstIP) == 0 {
+		return packetFlowKey{}, false
+	}
+	return packetFlowKey{
+		Protocol: packet.Decoded.Protocol,
+		SrcIP:    ipString(packet.Decoded.SrcIP),
+		DstIP:    ipString(packet.Decoded.DstIP),
+		SrcPort:  packet.Decoded.SrcPort,
+		DstPort:  packet.Decoded.DstPort,
+	}, true
+}
+
+func payloadStartsInvite(payload []byte) bool {
+	return bytes.HasPrefix(payload, []byte("INVITE "))
+}
+
+func ipString(ip net.IP) string {
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.String()
+	}
+	return ip.String()
 }
 
 // unchanged below

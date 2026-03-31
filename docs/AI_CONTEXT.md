@@ -151,6 +151,8 @@ This is the exact runtime sequencing model used by the app orchestrator.
 
 5. **Extract INVITE SDP**
    - First SIP INVITE with `Content-Type: application/sdp` body is selected.
+   - Targeted INVITE assembly is applied only for this step: if the INVITE starts in one packet and continues in immediately following packets of the same 5-tuple flow (protocol, src/dst IP, src/dst port), payload bytes are appended until SIP `Content-Length` is satisfied.
+   - This is intentionally a minimal workaround for finding the first INVITE with SDP; it is not full SIP/TCP reassembly and does not change RTP parsing/replay behavior.
 
 6. **Extract media metadata**
    - Parse audio/video `m=` sections and codec attributes.
