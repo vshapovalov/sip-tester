@@ -54,15 +54,17 @@ func copyMediaDestination(dest MediaDestination) MediaDestination {
 }
 
 type UDPSender struct {
-	conn         net.PacketConn
+	audioConn    net.PacketConn
+	videoConn    net.PacketConn
 	destinations *MediaDestinationStore
 	now          func() time.Time
 	sleep        func(time.Duration)
 }
 
-func NewUDPSender(conn net.PacketConn, destinations *MediaDestinationStore) *UDPSender {
+func NewUDPSender(audioConn, videoConn net.PacketConn, destinations *MediaDestinationStore) *UDPSender {
 	return &UDPSender{
-		conn:         conn,
+		audioConn:    audioConn,
+		videoConn:    videoConn,
 		destinations: destinations,
 		now:          time.Now,
 		sleep: func(d time.Duration) {
@@ -93,12 +95,27 @@ func (s *UDPSender) Replay(ctx context.Context, schedule []ScheduledPacket) erro
 			continue
 		}
 
-		if _, err := s.conn.WriteTo(marshalRTP(item.Packet), addr); err != nil {
+		conn := s.connForMedia(item.MediaType)
+		if conn == nil {
+			continue
+		}
+		if _, err := conn.WriteTo(marshalRTP(item.Packet), addr); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (s *UDPSender) connForMedia(mediaType MediaType) net.PacketConn {
+	switch mediaType {
+	case MediaTypeAudio:
+		return s.audioConn
+	case MediaTypeVideo:
+		return s.videoConn
+	default:
+		return nil
+	}
 }
 
 func destinationForPacket(dest MediaDestination, item ScheduledPacket) *net.UDPAddr {

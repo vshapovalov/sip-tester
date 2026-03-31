@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildOfferAudioOnly(t *testing.T) {
-	offer, err := BuildOffer(net.ParseIP("192.0.2.10"), []pcapread.SDPMedia{
+	offer, err := BuildOffer(net.ParseIP("192.0.2.10"), 12000, 12002, []pcapread.SDPMedia{
 		{
 			Media:        "audio",
 			PayloadTypes: []int{111, 0},
@@ -27,7 +27,7 @@ func TestBuildOfferAudioOnly(t *testing.T) {
 	mustContain(t, offer, "v=0\r\n")
 	mustContain(t, offer, "o=- 0 0 IN IP4 192.0.2.10\r\n")
 	mustContain(t, offer, "c=IN IP4 192.0.2.10\r\n")
-	mustContain(t, offer, "m=audio 4000 RTP/AVP 0 111\r\n")
+	mustContain(t, offer, "m=audio 12000 RTP/AVP 0 111\r\n")
 	mustContain(t, offer, "a=rtpmap:0 PCMU/8000\r\n")
 	mustContain(t, offer, "a=rtpmap:111 opus/48000/2\r\n")
 	mustContain(t, offer, "a=fmtp:111 minptime=10;useinbandfec=1\r\n")
@@ -36,7 +36,7 @@ func TestBuildOfferAudioOnly(t *testing.T) {
 }
 
 func TestBuildOfferVideoOnlyIPv6(t *testing.T) {
-	offer, err := BuildOffer(net.ParseIP("2001:db8::1234"), []pcapread.SDPMedia{
+	offer, err := BuildOffer(net.ParseIP("2001:db8::1234"), 13000, 13002, []pcapread.SDPMedia{
 		{
 			Media:        "video",
 			PayloadTypes: []int{96},
@@ -50,11 +50,11 @@ func TestBuildOfferVideoOnlyIPv6(t *testing.T) {
 
 	mustContain(t, offer, "o=- 0 0 IN IP6 2001:db8::1234\r\n")
 	mustContain(t, offer, "c=IN IP6 2001:db8::1234\r\n")
-	mustContain(t, offer, "m=video 4002 RTP/AVP 96\r\n")
+	mustContain(t, offer, "m=video 13002 RTP/AVP 96\r\n")
 }
 
 func TestBuildOfferAudioAndVideo(t *testing.T) {
-	offer, err := BuildOffer(net.ParseIP("198.51.100.44"), []pcapread.SDPMedia{
+	offer, err := BuildOffer(net.ParseIP("198.51.100.44"), 14000, 14002, []pcapread.SDPMedia{
 		{Media: "audio", PayloadTypes: []int{8}, RTPMap: map[int]string{8: "PCMA/8000"}, FMTP: map[int]string{}},
 		{Media: "video", PayloadTypes: []int{102}, RTPMap: map[int]string{102: "H264/90000"}, FMTP: map[int]string{}},
 	})
@@ -62,8 +62,8 @@ func TestBuildOfferAudioAndVideo(t *testing.T) {
 		t.Fatalf("BuildOffer returned error: %v", err)
 	}
 
-	audioIdx := strings.Index(offer, "m=audio 4000 RTP/AVP 8\r\n")
-	videoIdx := strings.Index(offer, "m=video 4002 RTP/AVP 102\r\n")
+	audioIdx := strings.Index(offer, "m=audio 14000 RTP/AVP 8\r\n")
+	videoIdx := strings.Index(offer, "m=video 14002 RTP/AVP 102\r\n")
 	if audioIdx == -1 || videoIdx == -1 {
 		t.Fatalf("missing media lines in offer: %q", offer)
 	}
@@ -73,9 +73,16 @@ func TestBuildOfferAudioAndVideo(t *testing.T) {
 }
 
 func TestBuildOfferRejectsEmptyMedia(t *testing.T) {
-	_, err := BuildOffer(net.ParseIP("192.0.2.10"), nil)
+	_, err := BuildOffer(net.ParseIP("192.0.2.10"), 12000, 12002, nil)
 	if err == nil {
 		t.Fatalf("expected error for empty media")
+	}
+}
+
+func TestBuildOfferRejectsZeroPort(t *testing.T) {
+	_, err := BuildOffer(net.ParseIP("192.0.2.10"), 0, 12002, []pcapread.SDPMedia{{Media: "audio", PayloadTypes: []int{0}}})
+	if err == nil {
+		t.Fatalf("expected error for zero port")
 	}
 }
 

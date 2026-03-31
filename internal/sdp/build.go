@@ -10,16 +10,14 @@ import (
 	"sip-tester/internal/pcapread"
 )
 
-const (
-	defaultAudioPort = 4000
-	defaultVideoPort = 4002
-)
-
 // BuildOffer builds a fresh SDP offer using parsed media metadata and a caller-provided local IP.
 // It intentionally does not preserve original transport addresses, ICE attributes, or crypto lines.
-func BuildOffer(localIP net.IP, media []pcapread.SDPMedia) (string, error) {
+func BuildOffer(localIP net.IP, audioPort, videoPort int, media []pcapread.SDPMedia) (string, error) {
 	if localIP == nil {
 		return "", fmt.Errorf("local IP is required")
+	}
+	if audioPort <= 0 || videoPort <= 0 {
+		return "", fmt.Errorf("audio/video ports must be greater than zero")
 	}
 	if len(media) == 0 {
 		return "", fmt.Errorf("at least one media section is required")
@@ -49,7 +47,10 @@ func BuildOffer(localIP net.IP, media []pcapread.SDPMedia) (string, error) {
 	}
 
 	for _, m := range sections {
-		port := mediaPort(m.Media)
+		port := audioPort
+		if m.Media == "video" {
+			port = videoPort
+		}
 		pts := append([]int(nil), m.PayloadTypes...)
 		sort.Ints(pts)
 
@@ -74,11 +75,4 @@ func BuildOffer(localIP net.IP, media []pcapread.SDPMedia) (string, error) {
 	}
 
 	return strings.Join(lines, "\r\n") + "\r\n", nil
-}
-
-func mediaPort(kind string) int {
-	if kind == "video" {
-		return defaultVideoPort
-	}
-	return defaultAudioPort
 }

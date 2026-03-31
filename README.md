@@ -35,6 +35,21 @@ The app runs this sequence:
 15. send BYE
 16. exit
 
+## RTP local sockets and SDP media ports
+
+After local IP/family selection, `sip-tester` allocates and binds two RTP UDP sockets on that exact local IP:
+
+- one socket for audio RTP,
+- one socket for video RTP.
+
+Port behavior:
+
+- both ports are allocated from `10000-20000`,
+- ports are bound before SDP offer generation,
+- SDP `m=audio` and `m=video` advertise those exact bound ports,
+- the same bound sockets are used for actual RTP sending (audio on audio socket, video on video socket),
+- sockets stay open for the full call lifetime and are closed on shutdown/error.
+
 ## Early media support (183 Session Progress)
 
 `sip-tester` supports SIP early media and provisional response handling:
@@ -104,4 +119,3 @@ PCAP parsing uses an internal, self-contained PCAP/PCAPNG reader (`internal/pcap
 - Decode starts from the capture link type in the packet metadata (`pcap` global link type or `pcapng` interface link type), not hardcoded Ethernet.
 - RTP extraction uses lightweight decoded packet metadata (`DecodedPacket`) and reads RTP from UDP payload only.
 - In `--debug` mode, packet decoding diagnostics include timestamp, link type, decode errors, IP/protocol/ports, and payload length.
-
