@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/gopacket"
 )
 
 type expectedRTPStream struct {
@@ -274,7 +272,7 @@ func loadExpectedStreamsFromCSV(t *testing.T, csvPath string) []expectedRTPStrea
 	return expected
 }
 
-func extractMediaHints(t *testing.T, packets []gopacket.Packet) (map[uint8]string, map[string]string) {
+func extractMediaHints(t *testing.T, packets []Packet) (map[uint8]string, map[string]string) {
 	t.Helper()
 	ptToMedia := map[uint8]string{}
 	codecToMedia := map[string]string{}
@@ -356,12 +354,15 @@ func classifyMediaLabel(label string) string {
 	}
 }
 
-func countDecodedLayers(packets []gopacket.Packet) (withNetworkLayer, withTransportLayer int) {
+func countDecodedLayers(packets []Packet) (withNetworkLayer, withTransportLayer int) {
 	for _, packet := range packets {
-		if packet.NetworkLayer() != nil {
+		if packet.DecodeErr != nil {
+			continue
+		}
+		if packet.Decoded.IPVersion != 0 {
 			withNetworkLayer++
 		}
-		if packet.TransportLayer() != nil {
+		if packet.Decoded.IsUDP || packet.Decoded.IsTCP {
 			withTransportLayer++
 		}
 	}

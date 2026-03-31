@@ -2,53 +2,48 @@ package pcapread
 
 import (
 	"fmt"
-	"io"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
+	"sip-tester/internal/pcapio"
 )
 
-// LoadPCAP reads an entire pcap file and decodes all packets.
-func LoadPCAP(path string) ([]gopacket.Packet, error) {
+type Packet struct {
+	Raw       pcapio.Packet
+	Decoded   pcapio.DecodedPacket
+	DecodeErr error
+}
+
+func LoadPCAP(path string) ([]Packet, error) {
 	packets, _, err := LoadPCAPWithLinkType(path)
 	return packets, err
 }
 
-// LoadPCAPWithLinkType reads an entire pcap file and returns decoded packets plus the capture link type.
-func LoadPCAPWithLinkType(path string) ([]gopacket.Packet, layers.LinkType, error) {
-	handle, err := pcap.OpenOffline(path)
+func LoadPCAPWithLinkType(path string) ([]Packet, uint32, error) {
+	raw, info, err := pcapio.ReadAll(path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("cannot open pcap %q: %w", path, err)
+		return nil, 0, err
 	}
-	defer handle.Close()
-
-	linkType := handle.LinkType()
-	source := gopacket.NewPacketSource(handle, linkType)
-	packets := make([]gopacket.Packet, 0, 1024)
-
-	for {
-		packet, err := source.NextPacket()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, linkType, fmt.Errorf("cannot decode pcap packet: %w", err)
-		}
-		packets = append(packets, packet)
+	out := make([]Packet, 0, len(raw))
+	var firstLinkType uint32
+	if len(raw) > 0 {
+		firstLinkType = raw[0].LinkType
 	}
-
-	return packets, linkType, nil
+	for _, rp := range raw {
+		dp, derr := pcapio.DecodePacket(rp)
+		out = append(out, Packet{Raw: rp, Decoded: dp, DecodeErr: derr})
+	}
+	if len(out) == 0 {
+		return nil, firstLinkType, fmt.Errorf("no packets in %s capture", info.Format)
+	}
+	return out, firstLinkType, nil
 }
 
-// CaptureDuration returns the wall-clock capture duration between first and last packet.
-func CaptureDuration(packets []gopacket.Packet) time.Duration {
+func CaptureDuration(packets []Packet) time.Duration {
 	if len(packets) < 2 {
 		return 0
 	}
-	start := packets[0].Metadata().CaptureInfo.Timestamp
-	end := packets[len(packets)-1].Metadata().CaptureInfo.Timestamp
+	start := packets[0].Raw.Timestamp
+	end := packets[len(packets)-1].Raw.Timestamp
 	if end.Before(start) {
 		return 0
 	}
