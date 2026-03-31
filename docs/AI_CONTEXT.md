@@ -77,7 +77,7 @@ In this project’s problem framing, SIPp limitations are primarily about media 
 - `internal/cli`: CLI parsing, validation, URI normalization, SSRC parsing.
 - `internal/config`: runtime configuration struct and required-flag checks.
 - `internal/netutil`: host:port parsing utilities.
-- `internal/pcapread`: PCAP load, INVITE/SDP extraction, RTP extraction/grouping.
+- `internal/pcapread`: PCAP load via real `github.com/google/gopacket` + `pcap.OpenOffline`, INVITE/SDP extraction, RTP extraction/grouping.
 - `internal/sdp`: SDP offer builder from extracted media metadata + current local IP.
 - `internal/sipclient`: outbound SIP client and dialog primitives (INVITE/ACK/BYE/INFO response).
 - `internal/replay`: RTP schedule creation and paced UDP sender.
@@ -680,3 +680,11 @@ sip-tester now supports SIP provisional response handling and early media using 
 - If no early SDP was received, replay starts only after ACK for `200 OK`.
 - `100rel/PRACK` is explicitly not supported; provisional responses requiring `100rel` fail with a clear error.
 - Early media is accepted from `183` only (not from `180`).
+
+
+## PCAP decoding implementation notes
+
+- The project now uses the real upstream `github.com/google/gopacket` library (the previous local stub replacement was removed because it was too limited for real captures).
+- Offline decode is created with `gopacket.NewPacketSource(handle, handle.LinkType())`; decode start layer must follow `handle.LinkType()` and must not assume Ethernet-only captures.
+- RTP/SIP traversal should use decoded transport layers (`packet.TransportLayer()`) so UDP/TCP payload access works across real-world link types.
+- For decode troubleshooting, use packet diagnostics that show link type, decoded layer stack, `ErrorLayer`, and whether `NetworkLayer` / `TransportLayer` are nil.
