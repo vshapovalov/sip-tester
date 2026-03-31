@@ -141,10 +141,10 @@ This is the exact runtime sequencing model used by the app orchestrator.
    - bare user values become `sip:user@host` using CLI host.
    - existing `sip:` URIs are left unchanged.
 
-3. **Resolve host using local-ip family intent**
-   - Runtime resolves host via DNS.
-   - Operational design intent: chosen target address should match the local bind IP family.
-   - Current implementation resolves host and uses first returned IP.
+3. **Resolve SIP target using `--local-ip` family**
+   - `--local-ip` is the **single source of truth** for IP family mode.
+   - Runtime resolves `--host` once, filters DNS answers to the same family as `--local-ip`, and selects from that filtered set.
+   - If `--host` is a literal IP, it must match `--local-ip` family or startup fails.
 
 4. **Read PCAP**
    - Entire file decoded into packet slice.
@@ -243,16 +243,18 @@ Example:
 
 - `--host` is split into host and port.
 - Host may be DNS name or IP literal.
-- Runtime resolves to network address for SIP transport.
-- Design expectation is family compatibility with `--local-ip`.
+- Runtime resolves SIP signaling destination once and stores a centralized resolved target.
+- DNS answers are filtered by the family from `--local-ip` only; no independent family inference from DNS or host text.
+- If no matching-family address exists, startup fails with a clear error.
 
 ### IPv4/IPv6 detection from `--local-ip`
 
 - `To4() != nil` => IPv4.
 - Otherwise => IPv6.
-- This family signal should drive:
+- This family signal is mandatory and drives:
   - socket bind behavior,
-  - destination selection,
+  - SIP target resolution,
+  - SDP destination compatibility checks,
   - SDP `c=` address family and IP.
 
 ---
@@ -416,19 +418,20 @@ Explicit SSRC selection prevents accidental replay of wrong media and removes am
 
 ### Family source
 
-- IP family is derived from `--local-ip` literal.
-- This is the anchor for signaling/media socket binds and SDP family.
+- `--local-ip` is the only source of truth for IP family selection.
+- Mixed-family operation is intentionally unsupported in current design.
 
 ### Destination behavior
 
 - `--host` may be DNS or literal.
-- Runtime resolves host and connects SIP UDP client to resolved address.
-- Operational requirement: choose destination address compatible with local bind family.
+- SIP signaling destination is resolved from `--host` using `--local-ip` family.
+- RTP remote destination is always taken from remote SDP (`183` early answer and `200 OK` final answer), not from SIP host resolution.
+- SDP media addresses must still match `--local-ip` family; incompatible `IP4`/`IP6` answers are rejected with explicit errors.
 
 ### Bind and SDP usage
 
-- SIP UDP socket binds to `--local-ip`.
-- RTP sender sockets bind to `--local-ip` (ephemeral local ports).
+- SIP UDP socket binds to `--local-ip` using family-specific network (`udp4` or `udp6`).
+- RTP sender sockets bind to `--local-ip` using family-specific network (`udp4` or `udp6`) with ephemeral local ports.
 - SDP `o=`/`c=` lines advertise `--local-ip` and corresponding `IP4`/`IP6` family.
 
 This keeps signaling, media sockets, and advertised addressing coherent.

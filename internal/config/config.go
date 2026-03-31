@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"net"
+
+	"sip-tester/internal/netutil"
 )
 
 type Config struct {
@@ -24,7 +26,7 @@ type Config struct {
 	Port   uint16
 
 	LocalIPParsed net.IP
-	IPFamily      string
+	IPFamily      netutil.IPFamily
 
 	SSRCAudio *uint32
 	SSRCVideo *uint32

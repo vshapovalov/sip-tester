@@ -56,10 +56,9 @@ func ParseArgs(args []string) (*config.Config, error) {
 		return nil, fmt.Errorf("--local-ip must be a literal IP address")
 	}
 	cfg.LocalIPParsed = ip
-	if ip.To4() != nil {
-		cfg.IPFamily = "ipv4"
-	} else {
-		cfg.IPFamily = "ipv6"
+	cfg.IPFamily, err = netutil.DetectIPFamily(ip)
+	if err != nil {
+		return nil, fmt.Errorf("detect local-ip family: %w", err)
 	}
 
 	if cfg.SSRCAudioRaw != "" {
