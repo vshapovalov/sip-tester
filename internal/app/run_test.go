@@ -96,3 +96,62 @@ func TestDestinationFromAnswer_FamilyValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestParseAndValidateSDPAddr_NormalizesBracketedIPv6(t *testing.T) {
+	tests := []struct {
+		name      string
+		family    netutil.IPFamily
+		network   string
+		ip        string
+		port      int
+		expectErr bool
+	}{
+		{
+			name:    "valid ipv6",
+			family:  netutil.IPFamilyV6,
+			network: "udp6",
+			ip:      "2a01:4f9:c012:f13::1",
+			port:    4000,
+		},
+		{
+			name:    "bracketed ipv6",
+			family:  netutil.IPFamilyV6,
+			network: "udp6",
+			ip:      "[2a01:4f9:c012:f13::1]",
+			port:    4000,
+		},
+		{
+			name:    "ipv4",
+			family:  netutil.IPFamilyV4,
+			network: "udp4",
+			ip:      "192.168.1.10",
+			port:    4000,
+		},
+		{
+			name:      "invalid",
+			family:    netutil.IPFamilyV6,
+			network:   "udp6",
+			ip:        "[invalid-ip]",
+			port:      4000,
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, err := parseAndValidateSDPAddr(tt.family, tt.network, tt.ip, tt.port)
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if addr == nil {
+				t.Fatalf("expected address")
+			}
+		})
+	}
+}

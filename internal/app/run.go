@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -306,6 +307,11 @@ func destinationFromAnswer(answer sipclient.SDPAnswer, family netutil.IPFamily, 
 }
 
 func parseAndValidateSDPAddr(family netutil.IPFamily, network, ip string, port int) (*net.UDPAddr, error) {
+	originalIP := ip
+	ip = normalizeIP(ip)
+	if originalIP != ip {
+		log.Printf("sip-tester: normalized SDP IP %s -> %s", originalIP, ip)
+	}
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return nil, fmt.Errorf("SDP remote media address is not a literal IP: %s", ip)
@@ -319,6 +325,14 @@ func parseAndValidateSDPAddr(family netutil.IPFamily, network, ip string, port i
 		return nil, fmt.Errorf("local-ip family IPv6 is incompatible with SDP remote media address %s", ip)
 	}
 	return net.ResolveUDPAddr(network, net.JoinHostPort(parsed.String(), strconv.Itoa(port)))
+}
+
+func normalizeIP(ip string) string {
+	ip = strings.TrimSpace(ip)
+	if len(ip) >= 2 && ip[0] == '[' && ip[len(ip)-1] == ']' {
+		return ip[1 : len(ip)-1]
+	}
+	return ip
 }
 
 func udpAddrString(addr *net.UDPAddr) string {
