@@ -78,6 +78,7 @@ In this project’s problem framing, SIPp limitations are primarily about media 
 - `internal/config`: runtime configuration struct and required-flag checks.
 - `internal/netutil`: host:port parsing utilities.
 - `internal/pcapread`: PCAP load via real `github.com/google/gopacket` + `pcap.OpenOffline`, INVITE/SDP extraction, RTP extraction/grouping.
+  - Integration-style tests use a real capture in `testdata/` and validate discovered RTP streams against CSV metadata expectations.
 - `internal/sdp`: SDP offer builder from extracted media metadata + current local IP.
 - `internal/sipclient`: outbound SIP client and dialog primitives (INVITE/ACK/BYE/INFO response).
 - `internal/replay`: RTP schedule creation and paced UDP sender.
