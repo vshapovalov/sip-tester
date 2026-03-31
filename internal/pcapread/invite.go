@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 )
 
 var (
@@ -23,22 +20,19 @@ type SDPMedia struct {
 	FMTP         map[int]string
 }
 
-// FindFirstInviteWithSDP finds the first SIP INVITE that carries SDP and returns the raw SDP body.
-func FindFirstInviteWithSDP(packets []gopacket.Packet) (string, error) {
+func FindFirstInviteWithSDP(packets []Packet) (string, error) {
 	for _, packet := range packets {
-		payload := transportPayload(packet)
+		payload := packet.Decoded.Payload
 		if len(payload) == 0 {
 			continue
 		}
-
 		sdp, invite, hasBody := parseInviteSDP(payload)
 		if invite && hasBody {
 			return sdp, nil
 		}
 	}
-
 	for _, packet := range packets {
-		payload := transportPayload(packet)
+		payload := packet.Decoded.Payload
 		if len(payload) == 0 {
 			continue
 		}
@@ -47,21 +41,7 @@ func FindFirstInviteWithSDP(packets []gopacket.Packet) (string, error) {
 			return "", ErrSDPNotFound
 		}
 	}
-
 	return "", ErrInviteNotFound
-}
-
-func transportPayload(packet gopacket.Packet) []byte {
-	if udp, ok := packet.TransportLayer().(*layers.UDP); ok {
-		return udp.Payload
-	}
-	if tcp, ok := packet.TransportLayer().(*layers.TCP); ok {
-		return tcp.Payload
-	}
-	if app := packet.ApplicationLayer(); app != nil {
-		return app.Payload()
-	}
-	return nil
 }
 
 func parseInviteSDP(payload []byte) (sdp string, isInvite bool, hasSDP bool) {
@@ -69,7 +49,6 @@ func parseInviteSDP(payload []byte) (sdp string, isInvite bool, hasSDP bool) {
 	if !strings.HasPrefix(text, "INVITE ") {
 		return "", false, false
 	}
-
 	parts := strings.SplitN(text, "\r\n\r\n", 2)
 	if len(parts) != 2 {
 		return "", true, false
@@ -78,7 +57,6 @@ func parseInviteSDP(payload []byte) (sdp string, isInvite bool, hasSDP bool) {
 	if !strings.Contains(headers, "\ncontent-type: application/sdp") && !strings.Contains(headers, "\r\ncontent-type: application/sdp") {
 		return "", true, false
 	}
-
 	body := strings.TrimSpace(parts[1])
 	if body == "" {
 		return "", true, false
@@ -86,18 +64,16 @@ func parseInviteSDP(payload []byte) (sdp string, isInvite bool, hasSDP bool) {
 	return body, true, true
 }
 
-// ParseSDPMedia parses audio/video sections and extracts payload types, rtpmap and fmtp attributes.
+// unchanged below
 func ParseSDPMedia(rawSDP string) ([]SDPMedia, error) {
 	lines := strings.Split(rawSDP, "\n")
 	media := make([]SDPMedia, 0, 2)
 	var current *SDPMedia
-
 	for _, line := range lines {
 		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
 		if line == "" {
 			continue
 		}
-
 		if strings.HasPrefix(line, "m=") {
 			section, ok := parseMediaLine(strings.TrimPrefix(line, "m="))
 			if !ok {
@@ -108,11 +84,9 @@ func ParseSDPMedia(rawSDP string) ([]SDPMedia, error) {
 			current = &media[len(media)-1]
 			continue
 		}
-
 		if current == nil || !strings.HasPrefix(line, "a=") {
 			continue
 		}
-
 		attr := strings.TrimPrefix(line, "a=")
 		if strings.HasPrefix(attr, "rtpmap:") {
 			pt, val, ok := parsePTAttribute(strings.TrimPrefix(attr, "rtpmap:"))
@@ -127,15 +101,12 @@ func ParseSDPMedia(rawSDP string) ([]SDPMedia, error) {
 			}
 		}
 	}
-
 	if len(media) == 0 {
 		return nil, fmt.Errorf("no audio/video media sections found")
 	}
-
 	return media, nil
 }
-
-func parseMediaLine(value string) (SDPMedia, bool) {
+func parseMediaLine(value string) (SDPMedia, bool) { /*same*/
 	fields := strings.Fields(value)
 	if len(fields) < 4 {
 		return SDPMedia{}, false
@@ -144,40 +115,26 @@ func parseMediaLine(value string) (SDPMedia, bool) {
 	if mediaType != "audio" && mediaType != "video" {
 		return SDPMedia{}, false
 	}
-
-	section := SDPMedia{
-		Media:        mediaType,
-		PayloadTypes: make([]int, 0, len(fields)-3),
-		RTPMap:       map[int]string{},
-		FMTP:         map[int]string{},
-	}
-
+	section := SDPMedia{Media: mediaType, PayloadTypes: make([]int, 0, len(fields)-3), RTPMap: map[int]string{}, FMTP: map[int]string{}}
 	for _, pt := range fields[3:] {
-		v, err := strconv.Atoi(pt)
-		if err != nil {
-			continue
+		if v, err := strconv.Atoi(pt); err == nil {
+			section.PayloadTypes = append(section.PayloadTypes, v)
 		}
-		section.PayloadTypes = append(section.PayloadTypes, v)
 	}
-
 	return section, true
 }
-
 func parsePTAttribute(value string) (pt int, param string, ok bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0, "", false
 	}
-
 	idx := bytes.IndexByte([]byte(value), ' ')
 	if idx <= 0 {
 		return 0, "", false
 	}
-
 	parsedPT, err := strconv.Atoi(strings.TrimSpace(value[:idx]))
 	if err != nil {
 		return 0, "", false
 	}
-
 	return parsedPT, strings.TrimSpace(value[idx+1:]), true
 }

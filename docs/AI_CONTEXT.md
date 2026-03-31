@@ -77,7 +77,7 @@ In this project’s problem framing, SIPp limitations are primarily about media 
 - `internal/cli`: CLI parsing, validation, URI normalization, SSRC parsing.
 - `internal/config`: runtime configuration struct and required-flag checks.
 - `internal/netutil`: host:port parsing utilities.
-- `internal/pcapread`: PCAP load via real `github.com/google/gopacket` + `pcap.OpenOffline`, INVITE/SDP extraction, RTP extraction/grouping.
+- `internal/pcapread`: PCAP load via internal `internal/pcapio` reader/decoder (pcap + pcapng), INVITE/SDP extraction, RTP extraction/grouping.
   - Integration-style tests use a real capture in `testdata/` and validate discovered RTP streams against CSV metadata expectations.
 - `internal/sdp`: SDP offer builder from extracted media metadata + current local IP.
 - `internal/sipclient`: outbound SIP client and dialog primitives (INVITE/ACK/BYE/INFO response).
@@ -685,7 +685,13 @@ sip-tester now supports SIP provisional response handling and early media using 
 
 ## PCAP decoding implementation notes
 
-- The project now uses the real upstream `github.com/google/gopacket` library (the previous local stub replacement was removed because it was too limited for real captures).
-- Offline decode is created with `gopacket.NewPacketSource(handle, handle.LinkType())`; decode start layer must follow `handle.LinkType()` and must not assume Ethernet-only captures.
-- RTP/SIP traversal should use decoded transport layers (`packet.TransportLayer()`) so UDP/TCP payload access works across real-world link types.
-- For decode troubleshooting, use packet diagnostics that show link type, decoded layer stack, `ErrorLayer`, and whether `NetworkLayer` / `TransportLayer` are nil.
+- The project intentionally avoids external packet decoding modules and uses an in-repo PCAP/PCAPNG parser/decoder (`internal/pcapio`) for offline/no-network environments.
+- Offline decode is done by `pcapio.ReadAll` + `pcapio.DecodePacket`; link type is per-file for pcap and per-interface for pcapng, so decoders must not assume Ethernet-only captures.
+- RTP/SIP traversal should use `DecodedPacket` transport metadata (`IsUDP`, `IsTCP`, `Payload`) so UDP/TCP payload access works across supported link types (Ethernet, RAW IP, Linux SLL/SLL2, Null/Loopback).
+- For decode troubleshooting, use packet diagnostics that show timestamp, link type, IP/protocol/ports, payload size, and decode error text.
+
+## Packet parsing architecture (internal parser)
+- `internal/pcapio` provides a self-contained reader/decoder for classic pcap and pcapng (SHB + IDB + EPB).
+- Supported link types for decode: Ethernet (including VLAN tags), RAW IP, Linux cooked SLL/SLL2, and Null/Loopback.
+- SIP/RTP workflows are UDP-centric and preserve capture timestamps from file records.
+- Current limitations: no TCP stream reassembly, no IPv4/IPv6 fragment reassembly beyond first fragment, and unsupported exotic link types return explicit errors.

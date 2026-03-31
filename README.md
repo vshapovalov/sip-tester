@@ -99,9 +99,9 @@ Dialog behavior implemented by the client:
 
 ## PCAP decoding
 
-PCAP parsing uses the real [`github.com/google/gopacket`](https://github.com/google/gopacket) library and offline reader (`pcap.OpenOffline`).
+PCAP parsing uses an internal, self-contained PCAP/PCAPNG reader (`internal/pcapio`) to keep builds deterministic and offline-friendly.
 
-- Decode starts from the capture link type reported by `handle.LinkType()` (not hardcoded Ethernet).
-- RTP extraction uses decoded transport layers (`packet.TransportLayer()`) and reads RTP from UDP payload only.
-- In `--debug` mode, packet decoding diagnostics include link type, layer stack, decode errors, and network/transport layer presence.
+- Decode starts from the capture link type in the packet metadata (`pcap` global link type or `pcapng` interface link type), not hardcoded Ethernet.
+- RTP extraction uses lightweight decoded packet metadata (`DecodedPacket`) and reads RTP from UDP payload only.
+- In `--debug` mode, packet decoding diagnostics include timestamp, link type, decode errors, IP/protocol/ports, and payload length.
 
