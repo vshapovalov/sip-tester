@@ -180,7 +180,7 @@ func (c *Client) WaitForInvite(ctx context.Context) (*sip.Request, *net.UDPAddr,
 }
 
 func (c *Client) NewInboundDialog(invite *sip.Request, localURI string) (*InboundDialog, error) {
-	remoteTarget, err := parseNameAddrTarget(invite.Headers["Contact"])
+	remoteTarget, err := parseNameAddrTarget(invite.GetHeader("Contact"))
 	if err != nil {
 		return nil, fmt.Errorf("parse Contact as remote target: %w", err)
 	}
@@ -188,13 +188,13 @@ func (c *Client) NewInboundDialog(invite *sip.Request, localURI string) (*Inboun
 	return &InboundDialog{
 		client:       c,
 		fromURI:      localURI,
-		toURI:        parseNameAddrToURI(invite.Headers["From"]),
-		callID:       invite.Headers["Call-ID"],
+		toURI:        parseNameAddrToURI(invite.GetHeader("From")),
+		callID:       invite.GetHeader("Call-ID"),
 		localTag:     localTag,
-		remoteTag:    extractTag(invite.Headers["From"]),
-		remoteTo:     invite.Headers["From"],
+		remoteTag:    extractTag(invite.GetHeader("From")),
+		remoteTo:     invite.GetHeader("From"),
 		remoteTarget: remoteTarget,
-		routeSet:     buildRouteSetForUAS(parseHeaderURIList(invite.Headers["Record-Route"])),
+		routeSet:     buildRouteSetForUAS(parseHeaderURIList(invite.HeaderValues("Record-Route"))),
 	}, nil
 }
 
@@ -207,7 +207,7 @@ func parseNameAddrToURI(raw string) string {
 }
 
 func (d *InboundDialog) inviteToWithLocalTag(invite *sip.Request) string {
-	base := strings.TrimSpace(invite.Headers["To"])
+	base := strings.TrimSpace(invite.GetHeader("To"))
 	if base == "" {
 		base = fmt.Sprintf("<%s>", d.fromURI)
 	}
@@ -219,11 +219,23 @@ func (d *InboundDialog) inviteToWithLocalTag(invite *sip.Request) string {
 
 func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAddr, code int, reason string, body string, contentType string) error {
 	headers := map[string]string{
-		"Via":     invite.Headers["Via"],
-		"From":    invite.Headers["From"],
+		"From":    invite.GetHeader("From"),
 		"To":      d.inviteToWithLocalTag(invite),
-		"Call-ID": invite.Headers["Call-ID"],
-		"CSeq":    invite.Headers["CSeq"],
+		"Call-ID": invite.GetHeader("Call-ID"),
+		"CSeq":    invite.GetHeader("CSeq"),
+	}
+	headerFields := make([]sip.Header, 0, 12)
+	for _, via := range invite.HeaderValues("Via") {
+		headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
+	}
+	headerFields = append(headerFields,
+		sip.Header{Name: "From", Value: headers["From"]},
+		sip.Header{Name: "To", Value: headers["To"]},
+		sip.Header{Name: "Call-ID", Value: headers["Call-ID"]},
+		sip.Header{Name: "CSeq", Value: headers["CSeq"]},
+	)
+	for _, rr := range invite.HeaderValues("Record-Route") {
+		headerFields = append(headerFields, sip.Header{Name: "Record-Route", Value: rr})
 	}
 	if invite.Method == "INVITE" && code == 200 {
 		contact, err := BuildRegisterContact(d.fromURI, d.client.localAddr)
@@ -231,11 +243,13 @@ func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAdd
 			return fmt.Errorf("build Contact for INVITE response: %w", err)
 		}
 		headers["Contact"] = fmt.Sprintf("<%s>", contact)
+		headerFields = append(headerFields, sip.Header{Name: "Contact", Value: headers["Contact"]})
 	}
 	if body != "" {
 		headers["Content-Type"] = contentType
+		headerFields = append(headerFields, sip.Header{Name: "Content-Type", Value: contentType})
 	}
-	resp := &sip.Response{StatusCode: code, Reason: reason, Headers: headers, Body: body}
+	resp := &sip.Response{StatusCode: code, Reason: reason, Headers: headers, HeaderFields: headerFields, Body: body}
 	_, err := d.client.conn.WriteToUDP(sip.BuildResponse(resp), addr)
 	return err
 }
@@ -290,9 +304,19 @@ func (d *InboundDialog) HandleIncomingRequest(ctx context.Context) (string, erro
 	}
 	switch req.Method {
 	case "INFO", "BYE":
+		headerFields := make([]sip.Header, 0, 8)
+		for _, via := range req.HeaderValues("Via") {
+			headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
+		}
+		headerFields = append(headerFields,
+			sip.Header{Name: "From", Value: req.GetHeader("From")},
+			sip.Header{Name: "To", Value: req.GetHeader("To")},
+			sip.Header{Name: "Call-ID", Value: req.GetHeader("Call-ID")},
+			sip.Header{Name: "CSeq", Value: req.GetHeader("CSeq")},
+		)
 		resp := &sip.Response{StatusCode: 200, Reason: "OK", Headers: map[string]string{
-			"Via": req.Headers["Via"], "From": req.Headers["From"], "To": req.Headers["To"], "Call-ID": req.Headers["Call-ID"], "CSeq": req.Headers["CSeq"],
-		}}
+			"From": req.GetHeader("From"), "To": req.GetHeader("To"), "Call-ID": req.GetHeader("Call-ID"), "CSeq": req.GetHeader("CSeq"),
+		}, HeaderFields: headerFields}
 		_, err = d.client.conn.WriteToUDP(sip.BuildResponse(resp), addr)
 		if err != nil {
 			return "", err
@@ -328,10 +352,21 @@ func (d *InboundDialog) buildByeRequest() *sip.Request {
 		"Call-ID":      d.callID,
 		"CSeq":         fmt.Sprintf("%d BYE", d.client.cseq),
 	}
+	headerFields := []sip.Header{
+		{Name: "Via", Value: headers["Via"]},
+		{Name: "Max-Forwards", Value: headers["Max-Forwards"]},
+		{Name: "From", Value: headers["From"]},
+		{Name: "To", Value: headers["To"]},
+		{Name: "Call-ID", Value: headers["Call-ID"]},
+		{Name: "CSeq", Value: headers["CSeq"]},
+	}
+	for _, route := range d.routeSet {
+		headerFields = append(headerFields, sip.Header{Name: "Route", Value: route})
+	}
 	if len(d.routeSet) > 0 {
 		headers["Route"] = strings.Join(d.routeSet, ", ")
 	}
-	return &sip.Request{Method: "BYE", URI: d.remoteTarget, Headers: headers}
+	return &sip.Request{Method: "BYE", URI: d.remoteTarget, Headers: headers, HeaderFields: headerFields}
 }
 
 func (d *InboundDialog) matchesRequestDialog(req *sip.Request) bool {

@@ -109,6 +109,70 @@ func TestSendInviteResponse_180DoesNotAddContact(t *testing.T) {
 	}
 }
 
+func TestSendInviteResponse_PropagatesAllViaAndRecordRoute(t *testing.T) {
+	server := mustListenUDP(t)
+	defer server.Close()
+
+	client := mustNewClientForServer(t, server)
+	defer client.Close()
+
+	dialog := &InboundDialog{
+		client:   client,
+		fromURI:  "sip:alice@example.com",
+		localTag: "ltag",
+	}
+	dialog.client.localAddr = &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 5060}
+
+	invite := &sip.Request{
+		Method: "INVITE",
+		Headers: map[string]string{
+			"From":    "<sip:bob@example.net>;tag=rtag",
+			"To":      "<sip:alice@example.com>",
+			"Call-ID": "call-multi",
+			"CSeq":    "1 INVITE",
+		},
+		HeaderFields: []sip.Header{
+			{Name: "Via", Value: "SIP/2.0/UDP edge.example.net;branch=z9hG4bK-edge"},
+			{Name: "Via", Value: "SIP/2.0/UDP core.example.net;branch=z9hG4bK-core"},
+			{Name: "Record-Route", Value: "<sip:edge.example.net;lr>"},
+			{Name: "Record-Route", Value: "<sip:core.example.net;lr>"},
+			{Name: "From", Value: "<sip:bob@example.net>;tag=rtag"},
+			{Name: "To", Value: "<sip:alice@example.com>"},
+			{Name: "Call-ID", Value: "call-multi"},
+			{Name: "CSeq", Value: "1 INVITE"},
+			{Name: "Contact", Value: "<sip:bob@198.51.100.10:5070>"},
+		},
+	}
+
+	if err := dialog.SendInviteResponse(invite, server.LocalAddr().(*net.UDPAddr), 180, "Ringing", "", ""); err != nil {
+		t.Fatalf("SendInviteResponse(180) error = %v", err)
+	}
+	ringing := readResponseFromServer(t, server)
+	if got, want := ringing.HeaderValues("Via"), []string{"SIP/2.0/UDP edge.example.net;branch=z9hG4bK-edge", "SIP/2.0/UDP core.example.net;branch=z9hG4bK-core"}; !equalStringSlices(got, want) {
+		t.Fatalf("180 Via=%#v want %#v", got, want)
+	}
+	if got, want := ringing.HeaderValues("Record-Route"), []string{"<sip:edge.example.net;lr>", "<sip:core.example.net;lr>"}; !equalStringSlices(got, want) {
+		t.Fatalf("180 Record-Route=%#v want %#v", got, want)
+	}
+	if got := ringing.GetHeader("To"); got != "<sip:alice@example.com>;tag=ltag" {
+		t.Fatalf("180 To=%q", got)
+	}
+
+	if err := dialog.SendInviteResponse(invite, server.LocalAddr().(*net.UDPAddr), 200, "OK", "v=0", "application/sdp"); err != nil {
+		t.Fatalf("SendInviteResponse(200) error = %v", err)
+	}
+	ok := readResponseFromServer(t, server)
+	if got, want := ok.HeaderValues("Via"), []string{"SIP/2.0/UDP edge.example.net;branch=z9hG4bK-edge", "SIP/2.0/UDP core.example.net;branch=z9hG4bK-core"}; !equalStringSlices(got, want) {
+		t.Fatalf("200 Via=%#v want %#v", got, want)
+	}
+	if got, want := ok.HeaderValues("Record-Route"), []string{"<sip:edge.example.net;lr>", "<sip:core.example.net;lr>"}; !equalStringSlices(got, want) {
+		t.Fatalf("200 Record-Route=%#v want %#v", got, want)
+	}
+	if got := ok.GetHeader("Contact"); got == "" {
+		t.Fatalf("200 Contact missing")
+	}
+}
+
 func TestInboundDialogMatchesACKAndINFO(t *testing.T) {
 	d := &InboundDialog{callID: "call-1", remoteTag: "rtag", localTag: "ltag"}
 	ack := &sip.Request{Method: "ACK", Headers: map[string]string{
@@ -380,4 +444,16 @@ func readRequestFromServer(t *testing.T, server *net.UDPConn) (*sip.Request, *ne
 		t.Fatalf("parse request err=%v", err)
 	}
 	return req, addr
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
