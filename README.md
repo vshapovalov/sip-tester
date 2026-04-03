@@ -13,6 +13,7 @@ sip-tester \
   --mode outbound \
   --caller 1001 \
   --callee 1002 \
+  --ua sip-tester \
   --host pbx.example.com:5060 \
   --local-ip 192.168.1.10 \
   --pcap call.pcap \
@@ -69,6 +70,7 @@ The app runs this sequence:
 - In `outbound` mode, `--callee` is required.
 - In `inbound` mode, `--callee` is optional (not required).
 - In `inbound` mode, `--caller` is treated as local AoR for REGISTER and dialog identity.
+- `--ua` controls the SIP `User-Agent` header value emitted by the tool in generated SIP requests and SIP responses (default: `sip-tester`).
 
 ## RTP local sockets and SDP media ports
 

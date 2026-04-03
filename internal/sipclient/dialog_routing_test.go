@@ -54,6 +54,9 @@ func TestBuildACK_UsesRemoteTargetAndRouteSet(t *testing.T) {
 	if got, want := ack.Headers["Route"], "<sip:proxy2.example.net;lr>, <sip:proxy1.example.net;lr>"; got != want {
 		t.Fatalf("ACK Route = %q, want %q", got, want)
 	}
+	if got, want := ack.Headers["User-Agent"], "test-ua"; got != want {
+		t.Fatalf("ACK User-Agent = %q, want %q", got, want)
+	}
 }
 
 func TestBuildInDialogRequest_UsesRemoteTargetAndRouteSet(t *testing.T) {
@@ -77,6 +80,9 @@ func TestBuildInDialogRequest_UsesRemoteTargetAndRouteSet(t *testing.T) {
 	}
 	if got, want := req.Headers["CSeq"], "2 BYE"; got != want {
 		t.Fatalf("BYE CSeq = %q, want %q", got, want)
+	}
+	if got, want := req.Headers["User-Agent"], "test-ua"; got != want {
+		t.Fatalf("BYE User-Agent = %q, want %q", got, want)
 	}
 }
 
@@ -137,6 +143,23 @@ func TestInboundBYE_UsesRemoteTargetAndUASRoutes(t *testing.T) {
 	if len(req.HeaderValues("Via")) != 1 {
 		t.Fatalf("BYE should generate exactly one Via, got %#v", req.HeaderValues("Via"))
 	}
+	if got, want := req.Headers["User-Agent"], "test-ua"; got != want {
+		t.Fatalf("BYE User-Agent = %q, want %q", got, want)
+	}
+}
+
+func TestBuildInvite_IncludesUserAgent(t *testing.T) {
+	c := testClientForRouting()
+	req := c.buildInvite("sip:alice@example.com", "sip:bob@example.net", "v=0", nil)
+	if got, want := req.Headers["User-Agent"], "test-ua"; got != want {
+		t.Fatalf("INVITE User-Agent = %q, want %q", got, want)
+	}
+}
+
+func TestFallbackUserAgent_DefaultWhenEmpty(t *testing.T) {
+	if got, want := fallbackUserAgent(""), "sip-tester"; got != want {
+		t.Fatalf("fallbackUserAgent(\"\") = %q, want %q", got, want)
+	}
 }
 
 func TestDialogMatchesDialog_ForIncomingINFO(t *testing.T) {
@@ -159,6 +182,7 @@ func testClientForRouting() *Client {
 		callID:    "call-1",
 		localTag:  "local123",
 		cseq:      1,
+		userAgent: "test-ua",
 	}
 }
 

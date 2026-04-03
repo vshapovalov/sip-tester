@@ -16,6 +16,7 @@ func ParseArgs(args []string) (*config.Config, error) {
 
 	cfg := &config.Config{}
 	fs.StringVar(&cfg.Mode, "mode", "outbound", "call mode: outbound|inbound")
+	fs.StringVar(&cfg.UA, "ua", "sip-tester", "SIP User-Agent header value")
 	fs.StringVar(&cfg.CallerRaw, "caller", "", "caller SIP URI or user")
 	fs.StringVar(&cfg.CalleeRaw, "callee", "", "callee SIP URI or user")
 	fs.StringVar(&cfg.HostRaw, "host", "", "remote SIP host:port")

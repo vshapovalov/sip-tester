@@ -9,6 +9,7 @@ import (
 
 type Config struct {
 	Mode string
+	UA   string
 
 	CallerRaw string
 	CalleeRaw string
@@ -37,6 +38,9 @@ type Config struct {
 func (c *Config) ValidateRequired() error {
 	if c.Mode == "" {
 		c.Mode = "outbound"
+	}
+	if c.UA == "" {
+		c.UA = "sip-tester"
 	}
 	if c.Mode != "outbound" && c.Mode != "inbound" {
 		return fmt.Errorf("--mode must be one of: outbound, inbound")

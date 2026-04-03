@@ -25,6 +25,7 @@ type Client struct {
 	cseq       int
 	username   string
 	password   string
+	userAgent  string
 }
 
 type InviteResult struct {
@@ -37,7 +38,7 @@ type InviteResult struct {
 
 type EarlyMediaHandler func(SDPAnswer) error
 
-func NewClient(localIP net.IP, family netutil.IPFamily, target netutil.ResolvedTarget, username, password string) (*Client, error) {
+func NewClient(localIP net.IP, family netutil.IPFamily, target netutil.ResolvedTarget, username, password, userAgent string) (*Client, error) {
 	if localIP == nil {
 		return nil, fmt.Errorf("local IP is required")
 	}
@@ -68,6 +69,7 @@ func NewClient(localIP net.IP, family netutil.IPFamily, target netutil.ResolvedT
 		cseq:       1,
 		username:   username,
 		password:   password,
+		userAgent:  fallbackUserAgent(userAgent),
 	}, nil
 }
 
@@ -248,6 +250,7 @@ func (c *Client) buildInvite(fromURI, toURI, offerSDP string, extraHeaders map[s
 		"CSeq":         fmt.Sprintf("%d INVITE", c.cseq),
 		"Contact":      fmt.Sprintf("<%s>", fromURI),
 		"Content-Type": "application/sdp",
+		"User-Agent":   c.userAgent,
 	}
 	for k, v := range extraHeaders {
 		headers[k] = v
@@ -287,6 +290,7 @@ func (c *Client) buildACK(fromURI string, inviteRes InviteResult) *sip.Request {
 			"Call-ID":      c.callID,
 			"CSeq":         fmt.Sprintf("%d ACK", c.cseq),
 			"Contact":      fmt.Sprintf("<%s>", fromURI),
+			"User-Agent":   c.userAgent,
 		},
 	}
 	if len(inviteRes.RouteSet) > 0 {
@@ -399,6 +403,14 @@ func require100Rel(rawRequire string) bool {
 		}
 	}
 	return false
+}
+
+func fallbackUserAgent(userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		return "sip-tester"
+	}
+	return userAgent
 }
 
 func randomToken(n int) string {

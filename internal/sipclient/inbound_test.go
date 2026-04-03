@@ -72,6 +72,9 @@ func TestSendInviteResponse_200IncludesContact(t *testing.T) {
 			if got := resp.Headers["Contact"]; got != tt.wantContact {
 				t.Fatalf("Contact header = %q, want %q", got, tt.wantContact)
 			}
+			if got, want := resp.Headers["User-Agent"], "test-ua"; got != want {
+				t.Fatalf("User-Agent = %q, want %q", got, want)
+			}
 		})
 	}
 }
@@ -106,6 +109,9 @@ func TestSendInviteResponse_180DoesNotAddContact(t *testing.T) {
 	resp := readResponseFromServer(t, server)
 	if got := resp.Headers["Contact"]; got != "" {
 		t.Fatalf("unexpected Contact in 180: %q", got)
+	}
+	if got, want := resp.Headers["User-Agent"], "test-ua"; got != want {
+		t.Fatalf("User-Agent = %q, want %q", got, want)
 	}
 }
 
@@ -170,6 +176,9 @@ func TestSendInviteResponse_PropagatesAllViaAndRecordRoute(t *testing.T) {
 	}
 	if got := ok.GetHeader("Contact"); got == "" {
 		t.Fatalf("200 Contact missing")
+	}
+	if got, want := ok.Headers["User-Agent"], "test-ua"; got != want {
+		t.Fatalf("200 User-Agent = %q, want %q", got, want)
 	}
 }
 
@@ -279,6 +288,9 @@ func TestHandleIncomingRequest_INFOGets200OK(t *testing.T) {
 	resp := readResponseFromServer(t, server)
 	if resp.StatusCode != 200 {
 		t.Fatalf("INFO response status = %d", resp.StatusCode)
+	}
+	if got, want := resp.Headers["User-Agent"], "test-ua"; got != want {
+		t.Fatalf("INFO response User-Agent = %q, want %q", got, want)
 	}
 	if got := <-result; got != "INFO" {
 		t.Fatalf("HandleIncomingRequest()=%q", got)
@@ -402,7 +414,7 @@ func mustNewClientForServer(t *testing.T, server *net.UDPConn) *Client {
 		RemoteIP:   net.ParseIP("127.0.0.1"),
 		RemoteAddr: server.LocalAddr().String(),
 	}
-	client, err := NewClient(net.ParseIP("127.0.0.1"), netutil.IPFamilyV4, target, "", "")
+	client, err := NewClient(net.ParseIP("127.0.0.1"), netutil.IPFamilyV4, target, "", "", "test-ua")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

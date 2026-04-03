@@ -89,6 +89,7 @@ func (c *Client) Register(ctx context.Context, aor string, contact string, expir
 			"CSeq":         fmt.Sprintf("%d REGISTER", cseq),
 			"Contact":      fmt.Sprintf("<%s>", contact),
 			"Expires":      strconv.Itoa(expires),
+			"User-Agent":   c.userAgent,
 		}
 		for k, v := range extra {
 			headers[k] = v
@@ -219,10 +220,11 @@ func (d *InboundDialog) inviteToWithLocalTag(invite *sip.Request) string {
 
 func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAddr, code int, reason string, body string, contentType string) error {
 	headers := map[string]string{
-		"From":    invite.GetHeader("From"),
-		"To":      d.inviteToWithLocalTag(invite),
-		"Call-ID": invite.GetHeader("Call-ID"),
-		"CSeq":    invite.GetHeader("CSeq"),
+		"From":       invite.GetHeader("From"),
+		"To":         d.inviteToWithLocalTag(invite),
+		"Call-ID":    invite.GetHeader("Call-ID"),
+		"CSeq":       invite.GetHeader("CSeq"),
+		"User-Agent": d.client.userAgent,
 	}
 	headerFields := make([]sip.Header, 0, 12)
 	for _, via := range invite.HeaderValues("Via") {
@@ -233,6 +235,7 @@ func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAdd
 		sip.Header{Name: "To", Value: headers["To"]},
 		sip.Header{Name: "Call-ID", Value: headers["Call-ID"]},
 		sip.Header{Name: "CSeq", Value: headers["CSeq"]},
+		sip.Header{Name: "User-Agent", Value: d.client.userAgent},
 	)
 	for _, rr := range invite.HeaderValues("Record-Route") {
 		headerFields = append(headerFields, sip.Header{Name: "Record-Route", Value: rr})
@@ -313,9 +316,10 @@ func (d *InboundDialog) HandleIncomingRequest(ctx context.Context) (string, erro
 			sip.Header{Name: "To", Value: req.GetHeader("To")},
 			sip.Header{Name: "Call-ID", Value: req.GetHeader("Call-ID")},
 			sip.Header{Name: "CSeq", Value: req.GetHeader("CSeq")},
+			sip.Header{Name: "User-Agent", Value: d.client.userAgent},
 		)
 		resp := &sip.Response{StatusCode: 200, Reason: "OK", Headers: map[string]string{
-			"From": req.GetHeader("From"), "To": req.GetHeader("To"), "Call-ID": req.GetHeader("Call-ID"), "CSeq": req.GetHeader("CSeq"),
+			"From": req.GetHeader("From"), "To": req.GetHeader("To"), "Call-ID": req.GetHeader("Call-ID"), "CSeq": req.GetHeader("CSeq"), "User-Agent": d.client.userAgent,
 		}, HeaderFields: headerFields}
 		_, err = d.client.conn.WriteToUDP(sip.BuildResponse(resp), addr)
 		if err != nil {
@@ -351,6 +355,7 @@ func (d *InboundDialog) buildByeRequest() *sip.Request {
 		"To":           d.remoteTo,
 		"Call-ID":      d.callID,
 		"CSeq":         fmt.Sprintf("%d BYE", d.client.cseq),
+		"User-Agent":   d.client.userAgent,
 	}
 	headerFields := []sip.Header{
 		{Name: "Via", Value: headers["Via"]},
@@ -359,6 +364,7 @@ func (d *InboundDialog) buildByeRequest() *sip.Request {
 		{Name: "To", Value: headers["To"]},
 		{Name: "Call-ID", Value: headers["Call-ID"]},
 		{Name: "CSeq", Value: headers["CSeq"]},
+		{Name: "User-Agent", Value: headers["User-Agent"]},
 	}
 	for _, route := range d.routeSet {
 		headerFields = append(headerFields, sip.Header{Name: "Route", Value: route})
