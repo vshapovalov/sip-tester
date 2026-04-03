@@ -112,6 +112,9 @@ func Run(args []string) error {
 	setup := &runSetup{
 		logger:           logger,
 		cfg:              cfg,
+		localMedia:       media,
+		audioPort:        audioPort,
+		videoPort:        videoPort,
 		schedule:         schedule,
 		audioConn:        audioConn,
 		videoConn:        videoConn,
@@ -132,6 +135,9 @@ func Run(args []string) error {
 type runSetup struct {
 	logger           *log.Logger
 	cfg              *config.Config
+	localMedia       []pcapread.SDPMedia
+	audioPort        int
+	videoPort        int
 	schedule         []replay.ScheduledPacket
 	audioConn        net.PacketConn
 	videoConn        net.PacketConn
@@ -233,10 +239,15 @@ func runInbound(s *runSetup) error {
 	}
 	s.logger.Println("incoming INVITE received")
 
-	offer, err := sipclient.ParseSDP(inviteReq.Body)
+	remoteOffer, err := sipclient.ParseSDP(inviteReq.Body)
 	if err != nil {
 		return fmt.Errorf("parse inbound INVITE SDP: %w", err)
 	}
+	answer, negotiated, err := sdp.BuildAnswer(cfg.LocalIPParsed, s.audioPort, s.videoPort, s.localMedia, remoteOffer)
+	if err != nil {
+		return fmt.Errorf("build inbound SDP answer: %w", err)
+	}
+	s.replayController.SetPayloadTypeMap(payloadTypeMapFromNegotiation(negotiated))
 	dialog, err := s.client.NewInboundDialog(inviteReq, cfg.Caller)
 	if err != nil {
 		return fmt.Errorf("create inbound dialog: %w", err)
@@ -248,7 +259,7 @@ func runInbound(s *runSetup) error {
 	}
 	time.Sleep(3 * time.Second)
 	s.logger.Println("send 200 OK")
-	if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 200, "OK", s.offer, "application/sdp"); err != nil {
+	if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 200, "OK", answer, "application/sdp"); err != nil {
 		return fmt.Errorf("send 200 OK: %w", err)
 	}
 
@@ -259,7 +270,7 @@ func runInbound(s *runSetup) error {
 	}
 	s.logger.Println("ACK received")
 
-	finalDest, err := destinationFromSDP(offer, cfg.IPFamily, replay.MediaStateFinal, true)
+	finalDest, err := destinationFromSDP(remoteOffer, cfg.IPFamily, replay.MediaStateFinal, true)
 	if err != nil {
 		return fmt.Errorf("INVITE SDP handling failed: %w", err)
 	}
@@ -299,6 +310,7 @@ type replayRunner struct {
 	wg        sync.WaitGroup
 	err       error
 	errSet    bool
+	ptMap     replay.PayloadTypeMap
 }
 
 func newReplayController(logger *log.Logger, schedule []replay.ScheduledPacket, store *replay.MediaDestinationStore, audioConn, videoConn net.PacketConn) *replayRunner {
@@ -334,12 +346,40 @@ func (r *replayRunner) Err() error {
 func (r *replayRunner) run() {
 	defer r.wg.Done()
 	r.logger.Println("replay started")
-	sender := replay.NewUDPSender(r.audioConn, r.videoConn, r.store)
+	sender := replay.NewUDPSenderWithPTMap(r.audioConn, r.videoConn, r.store, r.ptMap)
 	if err := sender.Replay(context.Background(), r.schedule); err != nil {
 		r.setErr(err)
 		return
 	}
 	r.logger.Println("replay finished")
+}
+
+func (r *replayRunner) SetPayloadTypeMap(ptMap replay.PayloadTypeMap) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ptMap = ptMap
+}
+
+func payloadTypeMapFromNegotiation(negotiated sdp.NegotiatedMedia) replay.PayloadTypeMap {
+	out := replay.PayloadTypeMap{}
+	for _, m := range negotiated.PayloadTypeMappings {
+		if m.LocalPT == m.NegotiatedPT {
+			continue
+		}
+		switch m.MediaType {
+		case "audio":
+			if out.Audio == nil {
+				out.Audio = map[uint8]uint8{}
+			}
+			out.Audio[m.LocalPT] = m.NegotiatedPT
+		case "video":
+			if out.Video == nil {
+				out.Video = map[uint8]uint8{}
+			}
+			out.Video[m.LocalPT] = m.NegotiatedPT
+		}
+	}
+	return out
 }
 
 func (r *replayRunner) setErr(err error) {

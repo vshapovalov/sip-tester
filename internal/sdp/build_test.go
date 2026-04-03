@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"sip-tester/internal/pcapread"
+	"sip-tester/internal/sipclient"
 )
 
 func TestBuildOfferAudioOnly(t *testing.T) {
@@ -84,6 +85,75 @@ func TestBuildOfferRejectsZeroPort(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for zero port")
 	}
+}
+
+func TestBuildAnswer_UsesOfferedDynamicPayloadTypeForH264(t *testing.T) {
+	answer, negotiated, err := BuildAnswer(net.ParseIP("157.180.116.6"), 10496, 12748, []pcapread.SDPMedia{
+		{Media: "audio", PayloadTypes: []int{0, 8, 101}, RTPMap: map[int]string{101: "telephone-event/8000"}, FMTP: map[int]string{101: "0-16"}},
+		{Media: "video", PayloadTypes: []int{96}, RTPMap: map[int]string{96: "H264/90000"}, FMTP: map[int]string{96: "profile-level-id=42801F"}},
+	}, sipclient.SDPAnswer{
+		Media: []sipclient.SDPMedia{
+			{Type: "audio", Port: 18704, Protocol: "RTP/AVP", Formats: []string{"0", "8", "101"}, RTPMap: map[string]string{"0": "PCMU/8000", "8": "PCMA/8000", "101": "telephone-event/8000"}, FMTP: map[string]string{"101": "0-16"}},
+			{Type: "video", Port: 12254, Protocol: "RTP/AVP", Formats: []string{"99"}, RTPMap: map[string]string{"99": "H264/90000"}, FMTP: map[string]string{"99": "profile-level-id=42801F"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildAnswer error: %v", err)
+	}
+	mustContain(t, answer, "m=video 12748 RTP/AVP 99\r\n")
+	mustNotContain(t, answer, "m=video 12748 RTP/AVP 96\r\n")
+	mustContain(t, answer, "a=fmtp:99 profile-level-id=42801F\r\n")
+
+	if !hasNegotiatedMapping(negotiated, "video", 96, 99) {
+		t.Fatalf("expected negotiated mapping video 96->99, got %#v", negotiated.PayloadTypeMappings)
+	}
+}
+
+func TestBuildAnswer_OfferDrivesMediaOrderAndUnsupportedSections(t *testing.T) {
+	answer, _, err := BuildAnswer(net.ParseIP("192.0.2.10"), 30000, 30002, []pcapread.SDPMedia{
+		{Media: "audio", PayloadTypes: []int{0}, RTPMap: map[int]string{}, FMTP: map[int]string{}},
+	}, sipclient.SDPAnswer{
+		Media: []sipclient.SDPMedia{
+			{Type: "video", Port: 4000, Protocol: "RTP/AVP", Formats: []string{"99"}, RTPMap: map[string]string{"99": "H264/90000"}, FMTP: map[string]string{"99": "profile-level-id=42801F"}},
+			{Type: "audio", Port: 5000, Protocol: "RTP/AVP", Formats: []string{"0"}, RTPMap: map[string]string{"0": "PCMU/8000"}, FMTP: map[string]string{}},
+			{Type: "application", Port: 6000, Protocol: "UDP", Formats: []string{"webrtc-datachannel"}, RTPMap: map[string]string{}, FMTP: map[string]string{}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildAnswer error: %v", err)
+	}
+	videoIdx := strings.Index(answer, "m=video 0 RTP/AVP 99\r\n")
+	audioIdx := strings.Index(answer, "m=audio 30000 RTP/AVP 0\r\n")
+	appIdx := strings.Index(answer, "m=application 0 UDP webrtc-datachannel\r\n")
+	if videoIdx == -1 || audioIdx == -1 || appIdx == -1 {
+		t.Fatalf("missing expected media lines in answer: %q", answer)
+	}
+	if !(videoIdx < audioIdx && audioIdx < appIdx) {
+		t.Fatalf("answer media order does not follow offer order: %q", answer)
+	}
+}
+
+func TestBuildAnswer_TelephoneEventOnlyWhenOffered(t *testing.T) {
+	answer, _, err := BuildAnswer(net.ParseIP("192.0.2.11"), 31000, 31002, []pcapread.SDPMedia{
+		{Media: "audio", PayloadTypes: []int{0, 101}, RTPMap: map[int]string{101: "telephone-event/8000"}, FMTP: map[int]string{101: "0-16"}},
+	}, sipclient.SDPAnswer{
+		Media: []sipclient.SDPMedia{
+			{Type: "audio", Port: 5000, Protocol: "RTP/AVP", Formats: []string{"0"}, RTPMap: map[string]string{"0": "PCMU/8000"}, FMTP: map[string]string{}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildAnswer error: %v", err)
+	}
+	mustNotContain(t, answer, "telephone-event")
+}
+
+func hasNegotiatedMapping(negotiated NegotiatedMedia, media string, localPT, negotiatedPT uint8) bool {
+	for _, m := range negotiated.PayloadTypeMappings {
+		if m.MediaType == media && m.LocalPT == localPT && m.NegotiatedPT == negotiatedPT {
+			return true
+		}
+	}
+	return false
 }
 
 func mustContain(t *testing.T, s, want string) {

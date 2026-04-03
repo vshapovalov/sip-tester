@@ -57,15 +57,26 @@ type UDPSender struct {
 	audioConn    net.PacketConn
 	videoConn    net.PacketConn
 	destinations *MediaDestinationStore
+	ptMap        PayloadTypeMap
 	now          func() time.Time
 	sleep        func(time.Duration)
 }
 
+type PayloadTypeMap struct {
+	Audio map[uint8]uint8
+	Video map[uint8]uint8
+}
+
 func NewUDPSender(audioConn, videoConn net.PacketConn, destinations *MediaDestinationStore) *UDPSender {
+	return NewUDPSenderWithPTMap(audioConn, videoConn, destinations, PayloadTypeMap{})
+}
+
+func NewUDPSenderWithPTMap(audioConn, videoConn net.PacketConn, destinations *MediaDestinationStore, ptMap PayloadTypeMap) *UDPSender {
 	return &UDPSender{
 		audioConn:    audioConn,
 		videoConn:    videoConn,
 		destinations: destinations,
+		ptMap:        copyPayloadTypeMap(ptMap),
 		now:          time.Now,
 		sleep: func(d time.Duration) {
 			time.Sleep(d)
@@ -99,12 +110,55 @@ func (s *UDPSender) Replay(ctx context.Context, schedule []ScheduledPacket) erro
 		if conn == nil {
 			continue
 		}
-		if _, err := conn.WriteTo(marshalRTP(item.Packet), addr); err != nil {
+		pkt := item.Packet
+		if mappedPT, ok := s.ptMap.mapPayloadType(item.MediaType, pkt.PayloadType); ok {
+			pkt.PayloadType = mappedPT
+		}
+		if _, err := conn.WriteTo(marshalRTP(pkt), addr); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func copyPayloadTypeMap(src PayloadTypeMap) PayloadTypeMap {
+	out := PayloadTypeMap{}
+	if len(src.Audio) > 0 {
+		out.Audio = make(map[uint8]uint8, len(src.Audio))
+		for from, to := range src.Audio {
+			out.Audio[from] = to
+		}
+	}
+	if len(src.Video) > 0 {
+		out.Video = make(map[uint8]uint8, len(src.Video))
+		for from, to := range src.Video {
+			out.Video[from] = to
+		}
+	}
+	return out
+}
+
+func (m PayloadTypeMap) mapPayloadType(mediaType MediaType, original uint8) (uint8, bool) {
+	if original > 127 {
+		return 0, false
+	}
+	switch mediaType {
+	case MediaTypeAudio:
+		if m.Audio == nil {
+			return 0, false
+		}
+		mapped, ok := m.Audio[original]
+		return mapped, ok
+	case MediaTypeVideo:
+		if m.Video == nil {
+			return 0, false
+		}
+		mapped, ok := m.Video[original]
+		return mapped, ok
+	default:
+		return 0, false
+	}
 }
 
 func (s *UDPSender) connForMedia(mediaType MediaType) net.PacketConn {

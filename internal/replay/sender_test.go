@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -233,5 +234,66 @@ func TestUDPSenderReplay_UsesSeparateAudioAndVideoSockets(t *testing.T) {
 	}
 	if len(videoConn.writes) != 1 {
 		t.Fatalf("expected 1 video write, got %d", len(videoConn.writes))
+	}
+}
+
+func TestUDPSenderReplay_RemapsPayloadTypePreservingMarkerAndPayload(t *testing.T) {
+	conn := &recordingConn{}
+	store := &MediaDestinationStore{}
+	store.Set(MediaDestination{VideoAddr: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5000}, State: MediaStateFinal})
+
+	s := NewUDPSenderWithPTMap(conn, conn, store, PayloadTypeMap{Video: map[uint8]uint8{96: 99}})
+	s.now = sequencedNow([]time.Time{time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0)})
+	s.sleep = func(time.Duration) {}
+
+	original := pcapread.RTPPacket{
+		Payload:     []byte{0xaa, 0xbb, 0xcc},
+		Sequence:    100,
+		Timestamp:   200,
+		SSRC:        300,
+		PayloadType: 96,
+		Marker:      false,
+	}
+	if err := s.Replay(context.Background(), []ScheduledPacket{{At: 0, MediaType: MediaTypeVideo, Packet: original}}); err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes=%d", len(conn.writes))
+	}
+	raw := conn.writes[0].data
+	if got := raw[1]; got != 99 {
+		t.Fatalf("payload type byte=%d want=99", got)
+	}
+	if !bytes.Equal(raw[12:], original.Payload) {
+		t.Fatalf("payload changed")
+	}
+	if binary.BigEndian.Uint16(raw[2:4]) != original.Sequence || binary.BigEndian.Uint32(raw[4:8]) != original.Timestamp || binary.BigEndian.Uint32(raw[8:12]) != original.SSRC {
+		t.Fatalf("non-PT RTP fields changed")
+	}
+
+	conn.writes = nil
+	original.Marker = true
+	if err := s.Replay(context.Background(), []ScheduledPacket{{At: 0, MediaType: MediaTypeVideo, Packet: original}}); err != nil {
+		t.Fatalf("Replay error (marker): %v", err)
+	}
+	raw = conn.writes[0].data
+	if got := raw[1]; got != 0x80|99 {
+		t.Fatalf("payload type byte with marker=%d want=%d", got, 0x80|99)
+	}
+}
+
+func TestUDPSenderReplay_NoRemapLeavesPayloadTypeUntouched(t *testing.T) {
+	conn := &recordingConn{}
+	store := &MediaDestinationStore{}
+	store.Set(MediaDestination{AudioAddr: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4000}, State: MediaStateFinal})
+	s := NewUDPSender(conn, conn, store)
+	s.now = sequencedNow([]time.Time{time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0)})
+	s.sleep = func(time.Duration) {}
+
+	if err := s.Replay(context.Background(), []ScheduledPacket{{At: 0, MediaType: MediaTypeAudio, Packet: pcapread.RTPPacket{Payload: []byte{1}, PayloadType: 96}}}); err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if got := conn.writes[0].data[1] & 0x7f; got != 96 {
+		t.Fatalf("payload type=%d want=96", got)
 	}
 }
