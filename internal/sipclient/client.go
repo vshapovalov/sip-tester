@@ -19,6 +19,7 @@ type Client struct {
 	conn       *net.UDPConn
 	remoteAddr *net.UDPAddr
 	localAddr  *net.UDPAddr
+	registrar  string
 	callID     string
 	localTag   string
 	cseq       int
@@ -61,6 +62,7 @@ func NewClient(localIP net.IP, family netutil.IPFamily, target netutil.ResolvedT
 		conn:       conn,
 		remoteAddr: remoteAddr,
 		localAddr:  bound,
+		registrar:  net.JoinHostPort(target.Hostname, fmt.Sprintf("%d", target.Port)),
 		callID:     randomToken(12),
 		localTag:   randomToken(8),
 		cseq:       1,

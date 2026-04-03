@@ -35,14 +35,47 @@ func BuildRegisterContact(aor string, localAddr *net.UDPAddr) (string, error) {
 		return "", fmt.Errorf("invalid AoR for Contact")
 	}
 	host := localAddr.IP.String()
-	if localAddr.IP.To4() == nil {
-		host = "[" + host + "]"
-	}
+	host = formatSIPURIHost(host)
 	return fmt.Sprintf("sip:%s@%s:%d", user, host, localAddr.Port), nil
 }
 
+func formatSIPURIHost(host string) string {
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+func buildRegisterURI(registrar string) (string, error) {
+	registrar = strings.TrimSpace(registrar)
+	if registrar == "" {
+		return "", fmt.Errorf("registrar host is required")
+	}
+
+	host := registrar
+	port := ""
+	if strings.Contains(registrar, ":") {
+		if h, p, err := net.SplitHostPort(registrar); err == nil {
+			host = h
+			port = p
+		}
+	}
+
+	host = formatSIPURIHost(host)
+	if port != "" {
+		return fmt.Sprintf("sip:%s:%s", host, port), nil
+	}
+	return "sip:" + host, nil
+}
+
 func (c *Client) Register(ctx context.Context, aor string, contact string, expires int) error {
-	registerURI := "sip:" + c.remoteAddr.IP.String()
+	registerURI, err := buildRegisterURI(c.registrar)
+	if err != nil {
+		return fmt.Errorf("build REGISTER request-uri: %w", err)
+	}
 	callID := randomToken(12)
 	cseq := 1
 	buildReq := func(extra map[string]string) *sip.Request {
