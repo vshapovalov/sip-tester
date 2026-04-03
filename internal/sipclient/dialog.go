@@ -80,26 +80,36 @@ func (d *Dialog) HandleIncomingINFO(ctx context.Context) (*InfoPayload, error) {
 	if req == nil || req.Method != "INFO" {
 		return nil, fmt.Errorf("expected incoming INFO")
 	}
-	if !d.matchesDialog(req.Headers["Call-ID"], req.Headers["From"], req.Headers["To"]) {
+	if !d.matchesDialog(req.GetHeader("Call-ID"), req.GetHeader("From"), req.GetHeader("To")) {
 		return nil, fmt.Errorf("incoming INFO did not match dialog")
 	}
-	log.Printf("sipclient: INFO matched to dialog call-id=%s", req.Headers["Call-ID"])
+	log.Printf("sipclient: INFO matched to dialog call-id=%s", req.GetHeader("Call-ID"))
 
 	payload := &InfoPayload{
-		ContentType: req.Headers["Content-Type"],
+		ContentType: req.GetHeader("Content-Type"),
 		Body:        req.Body,
 	}
 
+	headerFields := make([]sip.Header, 0, 8)
+	for _, via := range req.HeaderValues("Via") {
+		headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
+	}
+	headerFields = append(headerFields,
+		sip.Header{Name: "From", Value: req.GetHeader("From")},
+		sip.Header{Name: "To", Value: req.GetHeader("To")},
+		sip.Header{Name: "Call-ID", Value: req.GetHeader("Call-ID")},
+		sip.Header{Name: "CSeq", Value: req.GetHeader("CSeq")},
+	)
 	resp := &sip.Response{
 		StatusCode: 200,
 		Reason:     "OK",
 		Headers: map[string]string{
-			"Via":     req.Headers["Via"],
-			"From":    req.Headers["From"],
-			"To":      req.Headers["To"],
-			"Call-ID": req.Headers["Call-ID"],
-			"CSeq":    req.Headers["CSeq"],
+			"From":    req.GetHeader("From"),
+			"To":      req.GetHeader("To"),
+			"Call-ID": req.GetHeader("Call-ID"),
+			"CSeq":    req.GetHeader("CSeq"),
 		},
+		HeaderFields: headerFields,
 	}
 	_, err = d.client.conn.WriteToUDP(sip.BuildResponse(resp), addr)
 	if err != nil {
@@ -121,16 +131,30 @@ func (d *Dialog) buildInDialogRequest(method, contentType string) *sip.Request {
 	// SIP dialog routing for in-dialog requests:
 	// - Request-URI always targets the remote target from 200 OK Contact.
 	// - Route headers are populated from the dialog route set (Record-Route from 200 OK).
+	headerFields := make([]sip.Header, 0, 10+len(d.routeSet))
+	headerFields = append(headerFields,
+		sip.Header{Name: "Via", Value: headers["Via"]},
+		sip.Header{Name: "Max-Forwards", Value: headers["Max-Forwards"]},
+		sip.Header{Name: "From", Value: headers["From"]},
+		sip.Header{Name: "To", Value: headers["To"]},
+		sip.Header{Name: "Call-ID", Value: headers["Call-ID"]},
+		sip.Header{Name: "CSeq", Value: headers["CSeq"]},
+	)
+	for _, route := range d.routeSet {
+		headerFields = append(headerFields, sip.Header{Name: "Route", Value: route})
+	}
 	if len(d.routeSet) > 0 {
 		headers["Route"] = strings.Join(d.routeSet, ", ")
 	}
 	if contentType != "" {
 		headers["Content-Type"] = contentType
+		headerFields = append(headerFields, sip.Header{Name: "Content-Type", Value: contentType})
 	}
 	return &sip.Request{
-		Method:  method,
-		URI:     d.remoteTarget,
-		Headers: headers,
+		Method:       method,
+		URI:          d.remoteTarget,
+		Headers:      headers,
+		HeaderFields: headerFields,
 	}
 }
 

@@ -4,24 +4,32 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
 
+type Header struct {
+	Name  string
+	Value string
+}
+
 type Request struct {
-	Method  string
-	URI     string
-	Version string
-	Headers map[string]string
-	Body    string
+	Method       string
+	URI          string
+	Version      string
+	Headers      map[string]string
+	HeaderFields []Header
+	Body         string
 }
 
 type Response struct {
-	Version    string
-	StatusCode int
-	Reason     string
-	Headers    map[string]string
-	Body       string
+	Version      string
+	StatusCode   int
+	Reason       string
+	Headers      map[string]string
+	HeaderFields []Header
+	Body         string
 }
 
 func ParseMessage(raw []byte) (*Request, *Response, error) {
@@ -40,6 +48,7 @@ func ParseMessage(raw []byte) (*Request, *Response, error) {
 	startLine := sc.Text()
 
 	headers := map[string]string{}
+	headerFields := make([]Header, 0, 16)
 	for sc.Scan() {
 		line := sc.Text()
 		if line == "" {
@@ -49,7 +58,10 @@ func ParseMessage(raw []byte) (*Request, *Response, error) {
 		if len(kv) != 2 {
 			continue
 		}
-		headers[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+		name := strings.TrimSpace(kv[0])
+		value := strings.TrimSpace(kv[1])
+		headers[name] = value
+		headerFields = append(headerFields, Header{Name: name, Value: value})
 	}
 
 	if strings.HasPrefix(startLine, "SIP/") {
@@ -61,14 +73,14 @@ func ParseMessage(raw []byte) (*Request, *Response, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("bad status code: %w", err)
 		}
-		return nil, &Response{Version: p[0], StatusCode: code, Reason: p[2], Headers: headers, Body: body}, nil
+		return nil, &Response{Version: p[0], StatusCode: code, Reason: p[2], Headers: headers, HeaderFields: headerFields, Body: body}, nil
 	}
 
 	p := strings.SplitN(startLine, " ", 3)
 	if len(p) != 3 {
 		return nil, nil, fmt.Errorf("bad request line: %q", startLine)
 	}
-	return &Request{Method: p[0], URI: p[1], Version: p[2], Headers: headers, Body: body}, nil, nil
+	return &Request{Method: p[0], URI: p[1], Version: p[2], Headers: headers, HeaderFields: headerFields, Body: body}, nil, nil
 }
 
 func BuildRequest(req *Request) []byte {
@@ -77,13 +89,7 @@ func BuildRequest(req *Request) []byte {
 		version = "SIP/2.0"
 	}
 	buf := bytes.NewBufferString(fmt.Sprintf("%s %s %s\r\n", req.Method, req.URI, version))
-	if req.Headers == nil {
-		req.Headers = map[string]string{}
-	}
-	req.Headers["Content-Length"] = strconv.Itoa(len(req.Body))
-	for k, v := range req.Headers {
-		buf.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
-	}
+	writeHeaders(buf, req.Headers, req.HeaderFields, req.Body)
 	buf.WriteString("\r\n")
 	buf.WriteString(req.Body)
 	return buf.Bytes()
@@ -95,14 +101,80 @@ func BuildResponse(resp *Response) []byte {
 		version = "SIP/2.0"
 	}
 	buf := bytes.NewBufferString(fmt.Sprintf("%s %d %s\r\n", version, resp.StatusCode, resp.Reason))
-	if resp.Headers == nil {
-		resp.Headers = map[string]string{}
-	}
-	resp.Headers["Content-Length"] = strconv.Itoa(len(resp.Body))
-	for k, v := range resp.Headers {
-		buf.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
-	}
+	writeHeaders(buf, resp.Headers, resp.HeaderFields, resp.Body)
 	buf.WriteString("\r\n")
 	buf.WriteString(resp.Body)
 	return buf.Bytes()
+}
+
+func writeHeaders(buf *bytes.Buffer, headers map[string]string, fields []Header, body string) {
+	contentLength := strconv.Itoa(len(body))
+	if len(fields) > 0 {
+		for _, h := range fields {
+			if strings.EqualFold(h.Name, "Content-Length") {
+				continue
+			}
+			buf.WriteString(fmt.Sprintf("%s: %s\r\n", h.Name, h.Value))
+		}
+		buf.WriteString(fmt.Sprintf("Content-Length: %s\r\n", contentLength))
+		return
+	}
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	headers["Content-Length"] = contentLength
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		buf.WriteString(fmt.Sprintf("%s: %s\r\n", k, headers[k]))
+	}
+}
+
+func (r *Request) GetHeader(name string) string {
+	return getHeader(r.Headers, r.HeaderFields, name)
+}
+
+func (r *Request) HeaderValues(name string) []string {
+	return headerValues(r.Headers, r.HeaderFields, name)
+}
+
+func (resp *Response) GetHeader(name string) string {
+	return getHeader(resp.Headers, resp.HeaderFields, name)
+}
+
+func (resp *Response) HeaderValues(name string) []string {
+	return headerValues(resp.Headers, resp.HeaderFields, name)
+}
+
+func getHeader(headers map[string]string, fields []Header, name string) string {
+	for _, h := range fields {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value
+		}
+	}
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
+}
+
+func headerValues(headers map[string]string, fields []Header, name string) []string {
+	if len(fields) > 0 {
+		out := make([]string, 0, 2)
+		for _, h := range fields {
+			if strings.EqualFold(h.Name, name) {
+				out = append(out, h.Value)
+			}
+		}
+		return out
+	}
+	if v := getHeader(headers, nil, name); v != "" {
+		return []string{v}
+	}
+	return nil
 }

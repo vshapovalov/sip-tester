@@ -186,7 +186,7 @@ func (c *Client) retryInviteWithAuth(ctx context.Context, fromURI, toURI, offerS
 
 func parseDigestChallengeFromResponse(resp *sip.Response) (DigestChallenge, string, error) {
 	if resp.StatusCode == 401 {
-		raw := resp.Headers["WWW-Authenticate"]
+		raw := resp.GetHeader("WWW-Authenticate")
 		if raw == "" {
 			return DigestChallenge{}, "", fmt.Errorf("auth enabled but 401 response did not include a usable WWW-Authenticate challenge")
 		}
@@ -197,7 +197,7 @@ func parseDigestChallengeFromResponse(resp *sip.Response) (DigestChallenge, stri
 		return ch, "Authorization", nil
 	}
 	if resp.StatusCode == 407 {
-		raw := resp.Headers["Proxy-Authenticate"]
+		raw := resp.GetHeader("Proxy-Authenticate")
 		if raw == "" {
 			return DigestChallenge{}, "", fmt.Errorf("auth enabled but 407 response did not include a usable Proxy-Authenticate challenge")
 		}
@@ -216,15 +216,15 @@ func inviteResultFromResponse(resp *sip.Response) (InviteResult, error) {
 		return InviteResult{}, fmt.Errorf("parse SDP answer: %w", err)
 	}
 
-	toHeader := resp.Headers["To"]
+	toHeader := resp.GetHeader("To")
 	remoteTag := extractTag(toHeader)
-	remoteTarget, err := parseNameAddrTarget(resp.Headers["Contact"])
+	remoteTarget, err := parseNameAddrTarget(resp.GetHeader("Contact"))
 	if err != nil {
 		return InviteResult{}, fmt.Errorf("parse Contact as remote target: %w", err)
 	}
-	routeSet := buildRouteSetForUAC(parseHeaderURIList(resp.Headers["Record-Route"]))
+	routeSet := buildRouteSetForUAC(parseHeaderURIList(resp.HeaderValues("Record-Route")))
 
-	log.Printf("sipclient: dialog created call-id=%s local-tag=%s remote-tag=%s", resp.Headers["Call-ID"], extractTag(resp.Headers["From"]), remoteTag)
+	log.Printf("sipclient: dialog created call-id=%s local-tag=%s remote-tag=%s", resp.GetHeader("Call-ID"), extractTag(resp.GetHeader("From")), remoteTag)
 	log.Printf("sipclient: remote target=%s", remoteTarget)
 	log.Printf("sipclient: route set=%v", routeSet)
 
@@ -360,7 +360,7 @@ func (c *Client) waitForInviteResponse(ctx context.Context, earlyHandler EarlyMe
 			continue
 		}
 		if resp.StatusCode >= 100 && resp.StatusCode < 200 {
-			if require100Rel(resp.Headers["Require"]) {
+			if require100Rel(resp.GetHeader("Require")) {
 				return nil, fmt.Errorf("100rel/PRACK not supported")
 			}
 			switch resp.StatusCode {
@@ -442,19 +442,19 @@ func buildRouteSetForUAS(recordRoutes []string) []string {
 	return append([]string(nil), recordRoutes...)
 }
 
-func parseHeaderURIList(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+func parseHeaderURIList(values []string) []string {
+	if len(values) == 0 {
 		return nil
 	}
-	parts := strings.Split(raw, ",")
-	routes := make([]string, 0, len(parts))
-	for _, p := range parts {
-		route := strings.TrimSpace(p)
-		if route == "" {
-			continue
+	routes := make([]string, 0, len(values))
+	for _, raw := range values {
+		for _, p := range strings.Split(raw, ",") {
+			route := strings.TrimSpace(p)
+			if route == "" {
+				continue
+			}
+			routes = append(routes, route)
 		}
-		routes = append(routes, route)
 	}
 	return routes
 }

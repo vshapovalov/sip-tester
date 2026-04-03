@@ -131,6 +131,12 @@ func TestInboundBYE_UsesRemoteTargetAndUASRoutes(t *testing.T) {
 	if got, want := req.Headers["Route"], "<sip:edge.example.net;lr>, <sip:core.example.net;lr>"; got != want {
 		t.Fatalf("BYE Route = %q, want %q", got, want)
 	}
+	if got, want := req.HeaderValues("Route"), []string{"<sip:edge.example.net;lr>", "<sip:core.example.net;lr>"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("BYE Route values = %#v, want %#v", got, want)
+	}
+	if len(req.HeaderValues("Via")) != 1 {
+		t.Fatalf("BYE should generate exactly one Via, got %#v", req.HeaderValues("Via"))
+	}
 }
 
 func TestDialogMatchesDialog_ForIncomingINFO(t *testing.T) {
