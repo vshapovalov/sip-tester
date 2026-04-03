@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"sip-tester/internal/netutil"
 	"sip-tester/internal/replay"
+	"sip-tester/internal/sdp"
 	"sip-tester/internal/sipclient"
 )
 
@@ -187,5 +189,21 @@ func TestStartInboundRequestLoop_StopsOnCancel(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := handler.calls.Load(); got != callsAtStop {
 		t.Fatalf("handler calls advanced after loop stop: before=%d after=%d", callsAtStop, got)
+	}
+}
+
+func TestPayloadTypeMapFromNegotiation(t *testing.T) {
+	got := payloadTypeMapFromNegotiation(sdp.NegotiatedMedia{PayloadTypeMappings: []sdp.PayloadTypeNegotiation{
+		{MediaType: "audio", LocalPT: 101, NegotiatedPT: 101},
+		{MediaType: "audio", LocalPT: 110, NegotiatedPT: 111},
+		{MediaType: "video", LocalPT: 96, NegotiatedPT: 99},
+	}})
+
+	want := replay.PayloadTypeMap{
+		Audio: map[uint8]uint8{110: 111},
+		Video: map[uint8]uint8{96: 99},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("payloadTypeMapFromNegotiation=%#v want %#v", got, want)
 	}
 }
