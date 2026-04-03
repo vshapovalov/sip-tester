@@ -261,6 +261,67 @@ func TestInboundDialogBye_WaitsFor200OK(t *testing.T) {
 	}
 }
 
+func TestWaitForInvite_DoesNotChallengeUnauthenticatedInvite(t *testing.T) {
+	server := mustListenUDP(t)
+	defer server.Close()
+
+	client := mustNewClientForServer(t, server)
+	defer client.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		req, _, err := client.WaitForInvite(ctx)
+		if err != nil {
+			done <- err
+			return
+		}
+		if req.Headers["Authorization"] != "" || req.Headers["Proxy-Authorization"] != "" {
+			done <- nil
+			return
+		}
+		done <- nil
+	}()
+
+	sendRequestToClient(t, server, client.LocalAddr(), &sip.Request{
+		Method: "INVITE",
+		URI:    "sip:alice@example.com",
+		Headers: map[string]string{
+			"Via":     "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-inbound-no-auth",
+			"From":    "<sip:bob@example.net>;tag=rtag",
+			"To":      "<sip:alice@example.com>",
+			"Call-ID": "call-no-auth",
+			"CSeq":    "1 INVITE",
+			"Contact": "<sip:bob@example.net>",
+		},
+		Body: "v=0",
+	})
+
+	if err := <-done; err != nil {
+		t.Fatalf("WaitForInvite() error = %v", err)
+	}
+
+	// WaitForInvite must not emit a challenge response for inbound-mode initial INVITEs.
+	_ = server.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	buf := make([]byte, readBufferSize)
+	n, _, err := server.ReadFromUDP(buf)
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read possible challenge response: %v", err)
+	}
+	_, resp, parseErr := sip.ParseMessage(buf[:n])
+	if parseErr != nil || resp == nil {
+		t.Fatalf("unexpected outbound packet after INVITE: parseErr=%v", parseErr)
+	}
+	if resp.StatusCode == 401 || resp.StatusCode == 407 {
+		t.Fatalf("unexpected auth challenge response %d", resp.StatusCode)
+	}
+	t.Fatalf("unexpected response to initial inbound INVITE: %d %s", resp.StatusCode, resp.Reason)
+}
+
 func mustListenUDP(t *testing.T) *net.UDPConn {
 	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
