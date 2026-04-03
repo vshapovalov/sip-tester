@@ -162,3 +162,38 @@ func TestParseArgs_OutboundStillRequiresCallee(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestParseArgs_UserAgentDefault(t *testing.T) {
+	cfg, err := ParseArgs([]string{
+		"--caller", "1001",
+		"--callee", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.10",
+		"--pcap", "sample.pcap",
+		"--ssrc-audio", "287454020",
+	})
+	if err != nil {
+		t.Fatalf("ParseArgs error: %v", err)
+	}
+	if got, want := cfg.UA, "sip-tester"; got != want {
+		t.Fatalf("ua=%q, want %q", got, want)
+	}
+}
+
+func TestParseArgs_UserAgentOverride(t *testing.T) {
+	cfg, err := ParseArgs([]string{
+		"--caller", "1001",
+		"--callee", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.10",
+		"--pcap", "sample.pcap",
+		"--ssrc-audio", "287454020",
+		"--ua", "My-UA/2.0",
+	})
+	if err != nil {
+		t.Fatalf("ParseArgs error: %v", err)
+	}
+	if got, want := cfg.UA, "My-UA/2.0"; got != want {
+		t.Fatalf("ua=%q, want %q", got, want)
+	}
+}

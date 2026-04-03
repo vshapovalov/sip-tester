@@ -99,15 +99,17 @@ func (d *Dialog) HandleIncomingINFO(ctx context.Context) (*InfoPayload, error) {
 		sip.Header{Name: "To", Value: req.GetHeader("To")},
 		sip.Header{Name: "Call-ID", Value: req.GetHeader("Call-ID")},
 		sip.Header{Name: "CSeq", Value: req.GetHeader("CSeq")},
+		sip.Header{Name: "User-Agent", Value: d.client.userAgent},
 	)
 	resp := &sip.Response{
 		StatusCode: 200,
 		Reason:     "OK",
 		Headers: map[string]string{
-			"From":    req.GetHeader("From"),
-			"To":      req.GetHeader("To"),
-			"Call-ID": req.GetHeader("Call-ID"),
-			"CSeq":    req.GetHeader("CSeq"),
+			"From":       req.GetHeader("From"),
+			"To":         req.GetHeader("To"),
+			"Call-ID":    req.GetHeader("Call-ID"),
+			"CSeq":       req.GetHeader("CSeq"),
+			"User-Agent": d.client.userAgent,
 		},
 		HeaderFields: headerFields,
 	}
@@ -127,6 +129,7 @@ func (d *Dialog) buildInDialogRequest(method, contentType string) *sip.Request {
 		"To":           d.remoteTo,
 		"Call-ID":      d.client.callID,
 		"CSeq":         fmt.Sprintf("%d %s", d.client.cseq, method),
+		"User-Agent":   d.client.userAgent,
 	}
 	// SIP dialog routing for in-dialog requests:
 	// - Request-URI always targets the remote target from 200 OK Contact.
@@ -139,6 +142,7 @@ func (d *Dialog) buildInDialogRequest(method, contentType string) *sip.Request {
 		sip.Header{Name: "To", Value: headers["To"]},
 		sip.Header{Name: "Call-ID", Value: headers["Call-ID"]},
 		sip.Header{Name: "CSeq", Value: headers["CSeq"]},
+		sip.Header{Name: "User-Agent", Value: headers["User-Agent"]},
 	)
 	for _, route := range d.routeSet {
 		headerFields = append(headerFields, sip.Header{Name: "Route", Value: route})

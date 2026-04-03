@@ -34,6 +34,10 @@ func TestRegister_RetriesWithDigestAuth(t *testing.T) {
 			errCh <- fmt.Errorf("first REGISTER URI = %q, want %q", got, want)
 			return
 		}
+		if got, want := req1.Headers["User-Agent"], "test-ua"; got != want {
+			errCh <- fmt.Errorf("first REGISTER User-Agent = %q, want %q", got, want)
+			return
+		}
 		resp401 := &sip.Response{StatusCode: 401, Reason: "Unauthorized", Headers: map[string]string{
 			"Via": req1.Headers["Via"], "From": req1.Headers["From"], "To": req1.Headers["To"], "Call-ID": req1.Headers["Call-ID"], "CSeq": req1.Headers["CSeq"],
 			"WWW-Authenticate": `Digest realm="pbx", nonce="n1", qop="auth"`,
@@ -66,6 +70,10 @@ func TestRegister_RetriesWithDigestAuth(t *testing.T) {
 			errCh <- fmt.Errorf("Authorization header uri does not match request URI: %q", req2.Headers["Authorization"])
 			return
 		}
+		if got, want := req2.Headers["User-Agent"], "test-ua"; got != want {
+			errCh <- fmt.Errorf("authenticated REGISTER User-Agent = %q, want %q", got, want)
+			return
+		}
 		resp200 := &sip.Response{StatusCode: 200, Reason: "OK", Headers: map[string]string{
 			"Via": req2.Headers["Via"], "From": req2.Headers["From"], "To": req2.Headers["To"], "Call-ID": req2.Headers["Call-ID"], "CSeq": req2.Headers["CSeq"],
 		}}
@@ -73,7 +81,7 @@ func TestRegister_RetriesWithDigestAuth(t *testing.T) {
 	}()
 
 	target := netutil.ResolvedTarget{Hostname: "example.com", Port: 5060, RemoteIP: net.ParseIP("127.0.0.1"), RemoteAddr: server.LocalAddr().String()}
-	c, err := NewClient(net.ParseIP("127.0.0.1"), netutil.IPFamilyV4, target, "1001", "secret")
+	c, err := NewClient(net.ParseIP("127.0.0.1"), netutil.IPFamilyV4, target, "1001", "secret", "test-ua")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
