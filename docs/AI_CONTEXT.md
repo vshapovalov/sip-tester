@@ -666,11 +666,13 @@ When modifying `sip-tester`, preserve these invariants unless intentionally rede
 If a change violates any invariant, update this document and corresponding tests in the same change set.
 
 
-## SIP authentication (INVITE only)
+## SIP authentication (INVITE and REGISTER)
 
 Digest authentication is optional and controlled by CLI credentials:
 
-- If both `--username` and `--password` are provided, `sip-tester` handles a single Digest challenge for the initial outbound `INVITE`.
+- If both `--username` and `--password` are provided, `sip-tester` handles a single Digest challenge for:
+  - the initial outbound `INVITE`, and
+  - inbound-mode `REGISTER` when challenged.
 - Supported challenges:
   - `401 Unauthorized` with `WWW-Authenticate`
   - `407 Proxy Authentication Required` with `Proxy-Authenticate`
@@ -680,7 +682,7 @@ Digest authentication is optional and controlled by CLI credentials:
 
 MVP limitations:
 
-- INVITE digest auth only (no REGISTER/BYE/ACK auth)
+- Digest auth is implemented for INVITE and REGISTER (not BYE/ACK)
 - no cross-dialog auth caching
 - `algorithm=MD5` (or omitted algorithm) only
 - supports `qop=auth` or no `qop`

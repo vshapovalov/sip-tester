@@ -18,6 +18,97 @@ func TestInviteResponseToHeaderAddsLocalTag(t *testing.T) {
 	}
 }
 
+func TestSendInviteResponse_200IncludesContact(t *testing.T) {
+	server := mustListenUDP(t)
+	defer server.Close()
+
+	client := mustNewClientForServer(t, server)
+	defer client.Close()
+
+	tests := []struct {
+		name        string
+		localURI    string
+		localIP     string
+		wantContact string
+	}{
+		{
+			name:        "ipv4",
+			localURI:    "sip:159755@example.com",
+			localIP:     "192.0.2.10",
+			wantContact: "<sip:159755@192.0.2.10:5060>",
+		},
+		{
+			name:        "ipv6",
+			localURI:    "sip:159755@example.com",
+			localIP:     "2001:db8::10",
+			wantContact: "<sip:159755@[2001:db8::10]:5060>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dialog := &InboundDialog{
+				client:   client,
+				fromURI:  tt.localURI,
+				localTag: "ltag",
+			}
+			dialog.client.localAddr = &net.UDPAddr{IP: net.ParseIP(tt.localIP), Port: 5060}
+
+			invite := &sip.Request{
+				Method: "INVITE",
+				Headers: map[string]string{
+					"Via":     "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-invite",
+					"From":    "<sip:bob@example.net>;tag=rtag",
+					"To":      "<sip:159755@example.com>",
+					"Call-ID": "call-invite-contact",
+					"CSeq":    "1 INVITE",
+				},
+			}
+			if err := dialog.SendInviteResponse(invite, server.LocalAddr().(*net.UDPAddr), 200, "OK", "v=0", "application/sdp"); err != nil {
+				t.Fatalf("SendInviteResponse() error = %v", err)
+			}
+
+			resp := readResponseFromServer(t, server)
+			if got := resp.Headers["Contact"]; got != tt.wantContact {
+				t.Fatalf("Contact header = %q, want %q", got, tt.wantContact)
+			}
+		})
+	}
+}
+
+func TestSendInviteResponse_180DoesNotAddContact(t *testing.T) {
+	server := mustListenUDP(t)
+	defer server.Close()
+
+	client := mustNewClientForServer(t, server)
+	defer client.Close()
+	dialog := &InboundDialog{
+		client:   client,
+		fromURI:  "sip:159755@example.com",
+		localTag: "ltag",
+	}
+	dialog.client.localAddr = &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 5060}
+
+	invite := &sip.Request{
+		Method: "INVITE",
+		Headers: map[string]string{
+			"Via":     "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-ringing",
+			"From":    "<sip:bob@example.net>;tag=rtag",
+			"To":      "<sip:159755@example.com>",
+			"Call-ID": "call-ringing",
+			"CSeq":    "1 INVITE",
+		},
+	}
+	if err := dialog.SendInviteResponse(invite, server.LocalAddr().(*net.UDPAddr), 180, "Ringing", "", ""); err != nil {
+		t.Fatalf("SendInviteResponse() error = %v", err)
+	}
+
+	resp := readResponseFromServer(t, server)
+	if got := resp.Headers["Contact"]; got != "" {
+		t.Fatalf("unexpected Contact in 180: %q", got)
+	}
+}
+
 func TestInboundDialogMatchesACKAndINFO(t *testing.T) {
 	d := &InboundDialog{callID: "call-1", remoteTag: "rtag", localTag: "ltag"}
 	ack := &sip.Request{Method: "ACK", Headers: map[string]string{

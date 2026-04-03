@@ -77,12 +77,13 @@ func (c *Client) Register(ctx context.Context, aor string, contact string, expir
 		return fmt.Errorf("build REGISTER request-uri: %w", err)
 	}
 	callID := randomToken(12)
+	fromTag := randomToken(8)
 	cseq := 1
 	buildReq := func(extra map[string]string) *sip.Request {
 		headers := map[string]string{
 			"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", c.localAddr.String(), randomToken(9)),
 			"Max-Forwards": "70",
-			"From":         fmt.Sprintf("<%s>;tag=%s", aor, randomToken(8)),
+			"From":         fmt.Sprintf("<%s>;tag=%s", aor, fromTag),
 			"To":           fmt.Sprintf("<%s>", aor),
 			"Call-ID":      callID,
 			"CSeq":         fmt.Sprintf("%d REGISTER", cseq),
@@ -223,6 +224,13 @@ func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAdd
 		"To":      d.inviteToWithLocalTag(invite),
 		"Call-ID": invite.Headers["Call-ID"],
 		"CSeq":    invite.Headers["CSeq"],
+	}
+	if invite.Method == "INVITE" && code == 200 {
+		contact, err := BuildRegisterContact(d.fromURI, d.client.localAddr)
+		if err != nil {
+			return fmt.Errorf("build Contact for INVITE response: %w", err)
+		}
+		headers["Contact"] = fmt.Sprintf("<%s>", contact)
 	}
 	if body != "" {
 		headers["Content-Type"] = contentType
