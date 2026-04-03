@@ -103,6 +103,36 @@ func TestBuildRouteSetForUAC_MultipleRecordRoute(t *testing.T) {
 	}
 }
 
+func TestBuildRouteSetForUAS_PreservesOrder(t *testing.T) {
+	got := buildRouteSetForUAS([]string{"<sip:edge.example.net;lr>", "<sip:core.example.net;lr>"})
+	want := []string{"<sip:edge.example.net;lr>", "<sip:core.example.net;lr>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("route set = %#v, want %#v", got, want)
+	}
+}
+
+func TestInboundBYE_UsesRemoteTargetAndUASRoutes(t *testing.T) {
+	c := testClientForRouting()
+	c.cseq = 4
+	d := &InboundDialog{
+		client:       c,
+		fromURI:      "sip:alice@example.com",
+		localTag:     "local123",
+		remoteTo:     "<sip:bob@example.net>;tag=remote456",
+		callID:       "call-1",
+		remoteTarget: "sip:bob@192.0.2.55:5090",
+		routeSet:     []string{"<sip:edge.example.net;lr>", "<sip:core.example.net;lr>"},
+	}
+
+	req := d.buildByeRequest()
+	if got, want := req.URI, "sip:bob@192.0.2.55:5090"; got != want {
+		t.Fatalf("BYE URI = %q, want %q", got, want)
+	}
+	if got, want := req.Headers["Route"], "<sip:edge.example.net;lr>, <sip:core.example.net;lr>"; got != want {
+		t.Fatalf("BYE Route = %q, want %q", got, want)
+	}
+}
+
 func TestDialogMatchesDialog_ForIncomingINFO(t *testing.T) {
 	c := testClientForRouting()
 	d := &Dialog{

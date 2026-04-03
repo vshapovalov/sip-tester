@@ -26,7 +26,7 @@ type SDPMedia struct {
 	FMTP         map[string]string
 }
 
-func ParseSDPAnswer(raw string) (SDPAnswer, error) {
+func ParseSDP(raw string) (SDPAnswer, error) {
 	lines := strings.Split(raw, "\n")
 	answer := SDPAnswer{Media: make([]SDPMedia, 0, 2)}
 
@@ -72,9 +72,13 @@ func ParseSDPAnswer(raw string) (SDPAnswer, error) {
 	}
 
 	if len(answer.Media) == 0 {
-		return SDPAnswer{}, fmt.Errorf("SDP answer has no media sections")
+		return SDPAnswer{}, fmt.Errorf("SDP has no media sections")
 	}
 	return answer, nil
+}
+
+func ParseSDPAnswer(raw string) (SDPAnswer, error) {
+	return ParseSDP(raw)
 }
 
 func parseSDPMediaLine(raw string) (SDPMedia, error) {
