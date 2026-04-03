@@ -2,10 +2,15 @@
 
 SIP call replay tester that orchestrates SIP signaling and RTP playback from a PCAP capture.
 
+Supports two modes:
+- `outbound` (default): initiates a call as UAC.
+- `inbound`: registers, answers one inbound INVITE as UAS, replays RTP, sends BYE, exits.
+
 ## Example
 
 ```bash
 sip-tester \
+  --mode outbound \
   --caller 1001 \
   --callee 1002 \
   --host pbx.example.com:5060 \
@@ -15,6 +20,8 @@ sip-tester \
 ```
 
 ## Orchestration flow
+
+### Outbound mode (`--mode=outbound`, default)
 
 The app runs this sequence:
 
@@ -34,6 +41,34 @@ The app runs this sequence:
 14. handle INFO
 15. send BYE
 16. exit
+
+### Inbound mode (`--mode=inbound`)
+
+1. parse CLI
+2. normalize URIs (`--caller` is local identity/AoR)
+3. resolve host
+4. load PCAP
+5. extract streams and build replay schedule
+6. bind RTP sockets
+7. build local SDP from actual bound RTP ports
+8. send REGISTER
+9. wait one incoming INVITE on the same SIP socket
+10. send `180 Ringing`
+11. wait 3 seconds
+12. send `200 OK` with SDP
+13. wait matching ACK
+14. apply media destination from inbound INVITE SDP
+15. start RTP replay
+16. respond `200 OK` to in-dialog INFO while replay runs
+17. send BYE after replay and wait `200 OK`
+18. exit
+
+## Mode-specific CLI semantics
+
+- `--mode` allowed values: `outbound|inbound` (default: `outbound`).
+- In `outbound` mode, `--callee` is required.
+- In `inbound` mode, `--callee` is optional (not required).
+- In `inbound` mode, `--caller` is treated as local AoR for REGISTER and dialog identity.
 
 ## RTP local sockets and SDP media ports
 

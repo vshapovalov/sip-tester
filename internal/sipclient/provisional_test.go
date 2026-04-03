@@ -32,6 +32,34 @@ func TestParseSDPAnswer_ParsesMediaLevelConnectionFor183(t *testing.T) {
 	}
 }
 
+func TestParseSDP_ParsesInboundInviteOffer(t *testing.T) {
+	raw := strings.Join([]string{
+		"v=0",
+		"o=- 1 1 IN IP6 [2001:db8::10]",
+		"s=-",
+		"c=IN IP6 [2001:db8::10]",
+		"t=0 0",
+		"m=audio 4000 RTP/AVP 0",
+		"a=rtpmap:0 PCMU/8000",
+		"m=video 0 RTP/AVP 96",
+		"a=fmtp:96 profile-level-id=42e01f",
+	}, "\r\n")
+
+	offer, err := ParseSDP(raw)
+	if err != nil {
+		t.Fatalf("ParseSDP() error = %v", err)
+	}
+	if got, want := offer.ConnectionIP, "[2001:db8::10]"; got != want {
+		t.Fatalf("connection ip=%q want=%q", got, want)
+	}
+	if got := offer.Media[0].RTPMap["0"]; got != "PCMU/8000" {
+		t.Fatalf("audio rtpmap=%q", got)
+	}
+	if got := offer.Media[1].FMTP["96"]; got != "profile-level-id=42e01f" {
+		t.Fatalf("video fmtp=%q", got)
+	}
+}
+
 func TestRequire100Rel(t *testing.T) {
 	if !require100Rel("timer, 100rel") {
 		t.Fatalf("expected 100rel to be detected")

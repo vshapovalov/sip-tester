@@ -8,6 +8,8 @@ import (
 )
 
 type Config struct {
+	Mode string
+
 	CallerRaw string
 	CalleeRaw string
 	HostRaw   string
@@ -33,10 +35,16 @@ type Config struct {
 }
 
 func (c *Config) ValidateRequired() error {
+	if c.Mode == "" {
+		c.Mode = "outbound"
+	}
+	if c.Mode != "outbound" && c.Mode != "inbound" {
+		return fmt.Errorf("--mode must be one of: outbound, inbound")
+	}
 	if c.CallerRaw == "" {
 		return fmt.Errorf("--caller is required")
 	}
-	if c.CalleeRaw == "" {
+	if c.Mode == "outbound" && c.CalleeRaw == "" {
 		return fmt.Errorf("--callee is required")
 	}
 	if c.HostRaw == "" {

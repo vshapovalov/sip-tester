@@ -9,9 +9,13 @@ It is designed so an AI agent can understand architecture, behavior, boundaries,
 
 ### What `sip-tester` is
 
-`sip-tester` is a **deterministic outbound SIP call replay tool**. It is a CLI application that:
+`sip-tester` is a deterministic SIP call replay tool with two modes:
+- outbound UAC mode (default), and
+- inbound UAS mode (single-call REGISTER + answer flow).
 
-- initiates one outbound SIP call (UAC behavior),
+It is a CLI application that:
+
+- initiates one outbound SIP call (UAC) or answers one inbound call (UAS),
 - extracts SIP/SDP and RTP metadata from a PCAP capture,
 - negotiates media using a regenerated SDP offer,
 - replays captured RTP payload as outbound UDP RTP traffic.
@@ -80,7 +84,7 @@ In this project’s problem framing, SIPp limitations are primarily about media 
 - `internal/pcapread`: PCAP load via internal `internal/pcapio` reader/decoder (pcap + pcapng), INVITE/SDP extraction, RTP extraction/grouping.
   - Integration-style tests use a real capture in `testdata/` and validate discovered RTP streams against CSV metadata expectations.
 - `internal/sdp`: SDP offer builder from extracted media metadata + current local IP.
-- `internal/sipclient`: outbound SIP client and dialog primitives (INVITE/ACK/BYE/INFO response).
+- `internal/sipclient`: SIP client and dialog primitives for outbound INVITE and inbound UAS handling (REGISTER/INVITE/ACK/BYE/INFO response).
 - `internal/replay`: RTP schedule creation and paced UDP sender.
 - `internal/app`: orchestrator for end-to-end runtime flow.
 - `cmd/sip-tester`: CLI entrypoint invoking app orchestration.
@@ -209,6 +213,9 @@ This is the exact runtime sequencing model used by the app orchestrator.
   - Caller identity as SIP URI or bare user.
 - `--callee`
   - Callee identity as SIP URI or bare user.
+  - Required in outbound mode, optional in inbound mode.
+- `--mode`
+  - `outbound|inbound`, default `outbound`.
 - `--host`
   - Remote SIP destination in `host:port` form.
   - Supports DNS names, IPv4, and bracketed IPv6 literal with port.
@@ -230,6 +237,7 @@ This is the exact runtime sequencing model used by the app orchestrator.
 - If value starts with `sip:`, keep unchanged.
 - Otherwise normalize to `sip:<raw>@<host-from---host>`.
 - Host for normalization ignores port from `--host`.
+- In inbound mode, `--caller` is normalized the same way; empty `--callee` is allowed.
 
 Example:
 
@@ -265,25 +273,26 @@ Example:
 
 ### Scope
 
-- **Outbound-only UAC** behavior.
-- No REGISTER.
-- No inbound call establishment (not a UAS for INVITE).
+- Supports one outbound UAC call flow.
+- Supports one inbound UAS call flow (REGISTER, one INVITE, replay, BYE, exit).
+- No long-running multi-call server behavior.
 
 ### Dialog/signaling profile
 
-- Send one initial INVITE with SDP offer.
-- Wait for final non-1xx response (expects 200 OK).
-- Parse answer SDP.
-- Send ACK.
-- Build and persist dialog routing state from `200 OK` to `INVITE`:
-  - `Call-ID`,
-  - local `From` tag,
-  - remote `To` tag,
-  - remote target from `Contact`,
-  - route set from `Record-Route` (UAC route-set order),
-  - local CSeq progression.
-- During replay, listen for INFO and answer 200 OK.
-- Send BYE at end and require 200 OK.
+- **Outbound mode**:
+  - Send initial INVITE with SDP offer.
+  - Handle provisional/final responses, parse SDP answer, send ACK.
+  - Build UAC dialog routing from 200 OK (`Contact` + reversed Record-Route set).
+  - During replay, listen for INFO and answer 200 OK.
+  - Send BYE and require 200 OK.
+- **Inbound mode**:
+  - Send REGISTER first (with digest challenge handling when challenged).
+  - Wait one inbound INVITE on the same SIP socket.
+  - Send 180 Ringing, then 200 OK with SDP after 3 seconds.
+  - Wait matching ACK before replay starts.
+  - Build UAS dialog routing from INVITE (`Contact` remote target + non-reversed Record-Route set).
+  - While replay runs, answer in-dialog INFO with 200 OK.
+  - Send BYE at end and require 200 OK.
 
 ### INFO handling
 
@@ -454,8 +463,8 @@ Current scope intentionally excludes many SIP/media features:
 - no transcoding,
 - no loop playback mode,
 - no SIP over TCP/TLS (UDP only),
-- no full SIP authentication framework (digest/auth flows are not part of baseline orchestration),
-- no inbound call server mode.
+- no full SIP authentication framework (only single-challenge digest flows for INVITE/REGISTER),
+- no long-running inbound call server mode.
 
 This is a focused deterministic RTP replay tool, not a full SIP endpoint stack.
 
@@ -480,10 +489,10 @@ This is a focused deterministic RTP replay tool, not a full SIP endpoint stack.
 - Simplifies deterministic replay reasoning.
 - Provides foundation for future features (looping, speed factor, jitter injection, slicing).
 
-### Why outbound-only design
+### Why one-call mode design
 
-- Primary use case is active probe/call generation into existing infrastructure.
-- Outbound-only reduces SIP state complexity and implementation risk.
+- Primary use case is deterministic single-call reproduction into existing infrastructure.
+- One-call outbound/inbound flows keep SIP state complexity bounded and implementation risk low.
 
 ### Why minimal SIP feature set
 

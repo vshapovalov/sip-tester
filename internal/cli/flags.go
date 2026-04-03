@@ -15,6 +15,7 @@ func ParseArgs(args []string) (*config.Config, error) {
 	fs := flag.NewFlagSet("sip-tester", flag.ContinueOnError)
 
 	cfg := &config.Config{}
+	fs.StringVar(&cfg.Mode, "mode", "outbound", "call mode: outbound|inbound")
 	fs.StringVar(&cfg.CallerRaw, "caller", "", "caller SIP URI or user")
 	fs.StringVar(&cfg.CalleeRaw, "callee", "", "callee SIP URI or user")
 	fs.StringVar(&cfg.HostRaw, "host", "", "remote SIP host:port")
@@ -46,9 +47,11 @@ func ParseArgs(args []string) (*config.Config, error) {
 		return nil, fmt.Errorf("invalid caller: %w", err)
 	}
 
-	cfg.Callee, err = NormalizeURI(cfg.CalleeRaw, cfg.HostRaw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid callee: %w", err)
+	if cfg.CalleeRaw != "" {
+		cfg.Callee, err = NormalizeURI(cfg.CalleeRaw, cfg.HostRaw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid callee: %w", err)
+		}
 	}
 
 	ip := net.ParseIP(cfg.LocalIP)

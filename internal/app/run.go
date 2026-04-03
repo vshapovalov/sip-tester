@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"sip-tester/internal/cli"
+	"sip-tester/internal/config"
 	"sip-tester/internal/netutil"
 	"sip-tester/internal/pcapread"
 	"sip-tester/internal/replay"
@@ -108,71 +109,205 @@ func Run(args []string) error {
 	}
 	defer client.Close()
 
-	rtpStore := &replay.MediaDestinationStore{}
-	replayController := newReplayController(logger, schedule, rtpStore, audioConn, videoConn)
+	setup := &runSetup{
+		logger:           logger,
+		cfg:              cfg,
+		schedule:         schedule,
+		audioConn:        audioConn,
+		videoConn:        videoConn,
+		offer:            offer,
+		client:           client,
+		rtpStore:         &replay.MediaDestinationStore{},
+		replayController: nil,
+	}
+	setup.replayController = newReplayController(logger, schedule, setup.rtpStore, audioConn, videoConn)
 
+	if cfg.Mode == "inbound" {
+		logger.Println("mode=inbound")
+		return runInbound(setup)
+	}
+	return runOutbound(setup)
+}
+
+type runSetup struct {
+	logger           *log.Logger
+	cfg              *config.Config
+	schedule         []replay.ScheduledPacket
+	audioConn        net.PacketConn
+	videoConn        net.PacketConn
+	offer            string
+	client           *sipclient.Client
+	rtpStore         *replay.MediaDestinationStore
+	replayController *replayRunner
+}
+
+func runOutbound(s *runSetup) error {
+	cfg := s.cfg
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStepTimeout)
 	defer cancel()
 
-	logger.Println("send INVITE")
-	inviteRes, err := client.SendInviteWithEarlyMedia(ctx, cfg.Caller, cfg.Callee, offer, func(answer sipclient.SDPAnswer) error {
-		logger.Println("early SDP detected (183 Session Progress)")
-		earlyDest, err := destinationFromAnswer(answer, cfg.IPFamily, replay.MediaStateEarly, false)
+	s.logger.Println("send INVITE")
+	inviteRes, err := s.client.SendInviteWithEarlyMedia(ctx, cfg.Caller, cfg.Callee, s.offer, func(answer sipclient.SDPAnswer) error {
+		s.logger.Println("early SDP detected (183 Session Progress)")
+		earlyDest, err := destinationFromSDP(answer, cfg.IPFamily, replay.MediaStateEarly, false)
 		if err != nil {
 			return fmt.Errorf("183 SDP handling failed: %w", err)
 		}
-		rtpStore.Set(earlyDest)
-		logger.Printf("early media destination audio=%s video=%s", udpAddrString(earlyDest.AudioAddr), udpAddrString(earlyDest.VideoAddr))
-		if replayController.Start() {
-			logger.Println("early media started")
+		s.rtpStore.Set(earlyDest)
+		s.logger.Printf("early media destination audio=%s video=%s", udpAddrString(earlyDest.AudioAddr), udpAddrString(earlyDest.VideoAddr))
+		if s.replayController.Start() {
+			s.logger.Println("early media started")
 		} else {
-			logger.Println("early destination updated")
+			s.logger.Println("early destination updated")
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	logger.Println("200 OK received")
+	s.logger.Println("200 OK received")
 
-	logger.Println("send ACK")
-	if err := client.SendACK(cfg.Caller, inviteRes); err != nil {
+	s.logger.Println("send ACK")
+	if err := s.client.SendACK(cfg.Caller, inviteRes); err != nil {
 		return fmt.Errorf("send ACK: %w", err)
 	}
 
-	if !replayController.Started() {
-		logger.Println("start RTP replay")
-		replayController.Start()
+	if !s.replayController.Started() {
+		s.logger.Println("start RTP replay")
+		s.replayController.Start()
 	}
 
-	finalDest, err := destinationFromAnswer(inviteRes.SDPAnswer, cfg.IPFamily, replay.MediaStateFinal, true)
+	finalDest, err := destinationFromSDP(inviteRes.SDPAnswer, cfg.IPFamily, replay.MediaStateFinal, true)
 	if err != nil {
 		return fmt.Errorf("200 OK SDP handling failed: %w", err)
 	}
-	rtpStore.Set(finalDest)
-	logger.Printf("final destination applied audio=%s video=%s", udpAddrString(finalDest.AudioAddr), udpAddrString(finalDest.VideoAddr))
+	s.rtpStore.Set(finalDest)
+	s.logger.Printf("final destination applied audio=%s video=%s", udpAddrString(finalDest.AudioAddr), udpAddrString(finalDest.VideoAddr))
 
-	dialog := client.NewDialog(cfg.Caller, cfg.Callee, inviteRes)
+	dialog := s.client.NewDialog(cfg.Caller, cfg.Callee, inviteRes)
 
-	logger.Println("handle INFO")
+	s.logger.Println("handle INFO")
 	infoCtx, infoCancel := context.WithCancel(context.Background())
-	go handleInfoLoop(infoCtx, logger, dialog)
+	go handleInfoLoop(infoCtx, s.logger, dialog)
 
-	replayController.Wait()
+	s.replayController.Wait()
 	infoCancel()
 
-	if err := replayController.Err(); err != nil {
+	if err := s.replayController.Err(); err != nil {
 		return fmt.Errorf("RTP replay: %w", err)
 	}
 
 	byeCtx, byeCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
 	defer byeCancel()
-	logger.Println("send BYE")
+	s.logger.Println("send BYE")
 	if err := dialog.Bye(byeCtx); err != nil {
 		return fmt.Errorf("send BYE: %w", err)
 	}
 
-	logger.Println("exit")
+	s.logger.Println("exit")
+	return nil
+}
+
+func runInbound(s *runSetup) error {
+	cfg := s.cfg
+
+	contact, err := sipclient.BuildRegisterContact(cfg.Caller, s.client.LocalAddr())
+	if err != nil {
+		return fmt.Errorf("build REGISTER Contact: %w", err)
+	}
+
+	regCtx, regCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
+	defer regCancel()
+	s.logger.Println("send REGISTER")
+	if err := s.client.Register(regCtx, cfg.Caller, contact, 300); err != nil {
+		return err
+	}
+	s.logger.Println("REGISTER succeeded")
+
+	inviteCtx, inviteCancel := context.WithTimeout(context.Background(), 2*defaultStepTimeout)
+	defer inviteCancel()
+	s.logger.Println("waiting for incoming INVITE")
+	inviteReq, inviteAddr, err := s.client.WaitForInvite(inviteCtx)
+	if err != nil {
+		return fmt.Errorf("wait INVITE: %w", err)
+	}
+	s.logger.Println("incoming INVITE received")
+
+	offer, err := sipclient.ParseSDP(inviteReq.Body)
+	if err != nil {
+		return fmt.Errorf("parse inbound INVITE SDP: %w", err)
+	}
+	dialog, err := s.client.NewInboundDialog(inviteReq, cfg.Caller)
+	if err != nil {
+		return fmt.Errorf("create inbound dialog: %w", err)
+	}
+
+	s.logger.Println("send 180 Ringing")
+	if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 180, "Ringing", "", ""); err != nil {
+		return fmt.Errorf("send 180: %w", err)
+	}
+	time.Sleep(3 * time.Second)
+	s.logger.Println("send 200 OK")
+	if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 200, "OK", s.offer, "application/sdp"); err != nil {
+		return fmt.Errorf("send 200 OK: %w", err)
+	}
+
+	ackCtx, ackCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
+	defer ackCancel()
+	if err := dialog.WaitForACK(ackCtx); err != nil {
+		return fmt.Errorf("wait ACK: %w", err)
+	}
+	s.logger.Println("ACK received")
+
+	finalDest, err := destinationFromSDP(offer, cfg.IPFamily, replay.MediaStateFinal, true)
+	if err != nil {
+		return fmt.Errorf("INVITE SDP handling failed: %w", err)
+	}
+	s.rtpStore.Set(finalDest)
+
+	s.logger.Println("start RTP replay")
+	s.replayController.Start()
+	infoCtx, infoCancel := context.WithCancel(context.Background())
+	go func() {
+		defer infoCancel()
+		for {
+			select {
+			case <-infoCtx.Done():
+				return
+			default:
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			method, err := dialog.HandleIncomingRequest(ctx)
+			cancel()
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					continue
+				}
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					continue
+				}
+				continue
+			}
+			if method == "BYE" {
+				return
+			}
+		}
+	}()
+
+	s.replayController.Wait()
+	infoCancel()
+	if err := s.replayController.Err(); err != nil {
+		return fmt.Errorf("RTP replay: %w", err)
+	}
+	s.logger.Println("replay finished")
+
+	byeCtx, byeCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
+	defer byeCancel()
+	s.logger.Println("send BYE")
+	if err := dialog.Bye(byeCtx); err != nil {
+		return fmt.Errorf("send BYE: %w", err)
+	}
+	s.logger.Println("exit")
 	return nil
 }
 
@@ -262,7 +397,7 @@ func selectStreams(audioSSRC, videoSSRC *uint32, streams map[uint32][]pcapread.R
 	return audio, video, nil
 }
 
-func destinationFromAnswer(answer sipclient.SDPAnswer, family netutil.IPFamily, state replay.MediaState, enforceUsable bool) (replay.MediaDestination, error) {
+func destinationFromSDP(answer sipclient.SDPAnswer, family netutil.IPFamily, state replay.MediaState, enforceUsable bool) (replay.MediaDestination, error) {
 	dest := replay.MediaDestination{State: state}
 	network, err := netutil.UDPNetworkForFamily(family)
 	if err != nil {
@@ -307,6 +442,10 @@ func destinationFromAnswer(answer sipclient.SDPAnswer, family netutil.IPFamily, 
 		return replay.MediaDestination{}, fmt.Errorf("no usable media endpoints in SDP")
 	}
 	return dest, nil
+}
+
+func destinationFromAnswer(answer sipclient.SDPAnswer, family netutil.IPFamily, state replay.MediaState, enforceUsable bool) (replay.MediaDestination, error) {
+	return destinationFromSDP(answer, family, state, enforceUsable)
 }
 
 func parseAndValidateSDPAddr(family netutil.IPFamily, network, ip string, port int) (*net.UDPAddr, error) {

@@ -76,6 +76,10 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+func (c *Client) LocalAddr() *net.UDPAddr {
+	return c.localAddr
+}
+
 func (c *Client) Invite(ctx context.Context, fromURI, toURI, offerSDP string) (*Dialog, error) {
 	res, err := c.SendInvite(ctx, fromURI, toURI, offerSDP)
 	if err != nil {
@@ -205,7 +209,7 @@ func parseDigestChallengeFromResponse(resp *sip.Response) (DigestChallenge, stri
 }
 
 func inviteResultFromResponse(resp *sip.Response) (InviteResult, error) {
-	sdpAnswer, err := ParseSDPAnswer(resp.Body)
+	sdpAnswer, err := ParseSDP(resp.Body)
 	if err != nil {
 		return InviteResult{}, fmt.Errorf("parse SDP answer: %w", err)
 	}
@@ -427,6 +431,13 @@ func buildRouteSetForUAC(recordRoutes []string) []string {
 		routeSet = append(routeSet, recordRoutes[i])
 	}
 	return routeSet
+}
+
+func buildRouteSetForUAS(recordRoutes []string) []string {
+	if len(recordRoutes) == 0 {
+		return nil
+	}
+	return append([]string(nil), recordRoutes...)
 }
 
 func parseHeaderURIList(raw string) []string {
