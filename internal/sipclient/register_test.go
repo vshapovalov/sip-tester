@@ -46,6 +46,18 @@ func TestRegister_RetriesWithDigestAuth(t *testing.T) {
 			errCh <- fmt.Errorf("second request missing Authorization header")
 			return
 		}
+		if req2.Headers["Call-ID"] != req1.Headers["Call-ID"] {
+			errCh <- fmt.Errorf("Call-ID changed across REGISTER retry: %q -> %q", req1.Headers["Call-ID"], req2.Headers["Call-ID"])
+			return
+		}
+		if extractTag(req2.Headers["From"]) != extractTag(req1.Headers["From"]) {
+			errCh <- fmt.Errorf("From tag changed across REGISTER retry: %q -> %q", req1.Headers["From"], req2.Headers["From"])
+			return
+		}
+		if req2.Headers["CSeq"] != "2 REGISTER" {
+			errCh <- fmt.Errorf("retry CSeq = %q, want %q", req2.Headers["CSeq"], "2 REGISTER")
+			return
+		}
 		if got, want := req2.URI, "sip:example.com:5060"; got != want {
 			errCh <- fmt.Errorf("authenticated REGISTER URI = %q, want %q", got, want)
 			return

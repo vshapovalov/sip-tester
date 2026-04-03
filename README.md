@@ -100,11 +100,11 @@ Port behavior:
 
 ## SIP authentication
 
-`sip-tester` supports optional SIP Digest authentication for the initial outbound `INVITE`.
+`sip-tester` supports optional SIP Digest authentication for outbound `INVITE` and inbound-mode `REGISTER`.
 
 - Provide both `--username` and `--password` to enable authentication.
-- The client sends the initial `INVITE` without auth.
-- If the server challenges with `401 WWW-Authenticate` or `407 Proxy-Authenticate` using Digest, `sip-tester` retries the `INVITE` with `Authorization` or `Proxy-Authorization`.
+- The client sends the initial request without auth.
+- If the server challenges with `401 WWW-Authenticate` or `407 Proxy-Authenticate` using Digest, `sip-tester` retries the request with `Authorization` or `Proxy-Authorization`.
 - If credentials are not provided and the server requires auth, `sip-tester` exits with a clear error.
 
 Current MVP limitations:
@@ -112,7 +112,7 @@ Current MVP limitations:
 - MD5 only (`algorithm=MD5` or omitted algorithm)
 - `qop=auth` is supported
 - `qop=auth-int` is not supported
-- no repeated auth retry loops (single authenticated retry only)
+- no repeated auth retry loops (single authenticated retry only per request)
 
 ### Example with authentication
 

@@ -1,13 +1,26 @@
 package app
 
 import (
+	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"sip-tester/internal/netutil"
 	"sip-tester/internal/replay"
 	"sip-tester/internal/sipclient"
 )
+
+type fakeInboundRequestHandler struct {
+	calls atomic.Int32
+}
+
+func (f *fakeInboundRequestHandler) HandleIncomingRequest(ctx context.Context) (string, error) {
+	f.calls.Add(1)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
 
 func TestDestinationFromAnswer_EarlyAndFinalSwitch(t *testing.T) {
 	early, err := destinationFromAnswer(sipclient.SDPAnswer{
@@ -153,5 +166,26 @@ func TestParseAndValidateSDPAddr_NormalizesBracketedIPv6(t *testing.T) {
 				t.Fatalf("expected address")
 			}
 		})
+	}
+}
+
+func TestStartInboundRequestLoop_StopsOnCancel(t *testing.T) {
+	handler := &fakeInboundRequestHandler{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startInboundRequestLoop(ctx, handler)
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request loop did not stop after cancel")
+	}
+
+	callsAtStop := handler.calls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := handler.calls.Load(); got != callsAtStop {
+		t.Fatalf("handler calls advanced after loop stop: before=%d after=%d", callsAtStop, got)
 	}
 }

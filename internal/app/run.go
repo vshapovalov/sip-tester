@@ -268,34 +268,11 @@ func runInbound(s *runSetup) error {
 	s.logger.Println("start RTP replay")
 	s.replayController.Start()
 	infoCtx, infoCancel := context.WithCancel(context.Background())
-	go func() {
-		defer infoCancel()
-		for {
-			select {
-			case <-infoCtx.Done():
-				return
-			default:
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			method, err := dialog.HandleIncomingRequest(ctx)
-			cancel()
-			if err != nil {
-				if errors.Is(err, context.DeadlineExceeded) {
-					continue
-				}
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					continue
-				}
-				continue
-			}
-			if method == "BYE" {
-				return
-			}
-		}
-	}()
+	infoDone := startInboundRequestLoop(infoCtx, dialog)
 
 	s.replayController.Wait()
 	infoCancel()
+	<-infoDone
 	if err := s.replayController.Err(); err != nil {
 		return fmt.Errorf("RTP replay: %w", err)
 	}
@@ -508,4 +485,39 @@ func handleInfoLoop(ctx context.Context, logger *log.Logger, dialog *sipclient.D
 
 		logger.Printf("handled INFO content-type=%q bytes=%d", payload.ContentType, len(payload.Body))
 	}
+}
+
+type inboundRequestHandler interface {
+	HandleIncomingRequest(ctx context.Context) (string, error)
+}
+
+func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, time.Second)
+			method, err := dialog.HandleIncomingRequest(waitCtx)
+			cancel()
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					continue
+				}
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					continue
+				}
+				continue
+			}
+			if method == "BYE" {
+				return
+			}
+		}
+	}()
+	return done
 }
