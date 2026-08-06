@@ -13,8 +13,8 @@ const (
 	maxMediaPort = 20000
 )
 
-// BindMediaSockets binds two RTP sockets (audio and video) on localIP using the provided UDP network.
-func BindMediaSockets(network string, localIP net.IP) (audioConn net.PacketConn, videoConn net.PacketConn, audioPort int, videoPort int, err error) {
+// BindMediaSockets binds the RTP sockets on localIP using the provided UDP network.
+func BindMediaSockets(network string, localIP net.IP, bundle bool) (audioConn net.PacketConn, videoConn net.PacketConn, audioPort int, videoPort int, err error) {
 	if localIP == nil {
 		return nil, nil, 0, 0, fmt.Errorf("local IP is required")
 	}
@@ -22,6 +22,9 @@ func BindMediaSockets(network string, localIP net.IP) (audioConn net.PacketConn,
 	audioConn, audioPort, err = bindOnePort(network, localIP, nil)
 	if err != nil {
 		return nil, nil, 0, 0, err
+	}
+	if bundle {
+		return audioConn, audioConn, audioPort, audioPort, nil
 	}
 
 	videoConn, videoPort, err = bindOnePort(network, localIP, map[int]struct{}{audioPort: {}})

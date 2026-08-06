@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"sip-tester/internal/netutil"
 )
@@ -17,11 +18,13 @@ type Config struct {
 	LocalIP   string
 	PCAP      string
 
-	SSRCAudioRaw string
-	SSRCVideoRaw string
-	Debug        bool
-	Username     string
-	Password     string
+	SSRCAudioRaw  string
+	SSRCVideoRaw  string
+	Debug         bool
+	Bundle        bool
+	ReinviteAfter time.Duration
+	Username      string
+	Password      string
 
 	Caller string
 	Callee string
@@ -65,6 +68,15 @@ func (c *Config) ValidateRequired() error {
 	}
 	if (c.Username == "") != (c.Password == "") {
 		return fmt.Errorf("--username and --password must be provided together")
+	}
+	if c.ReinviteAfter < 0 {
+		return fmt.Errorf("--reinvite-after must not be negative")
+	}
+	if c.ReinviteAfter > 0 && c.Mode != "inbound" {
+		return fmt.Errorf("--reinvite-after requires --mode inbound")
+	}
+	if c.Bundle && c.Mode == "inbound" && c.ReinviteAfter == 0 {
+		return fmt.Errorf("--bundle in inbound mode requires --reinvite-after")
 	}
 	return nil
 }

@@ -20,7 +20,7 @@ func TestBuildOfferAudioOnly(t *testing.T) {
 			},
 			FMTP: map[int]string{111: "minptime=10;useinbandfec=1"},
 		},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("BuildOffer returned error: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestBuildOfferVideoOnlyIPv6(t *testing.T) {
 			RTPMap:       map[int]string{96: "H264/90000"},
 			FMTP:         map[int]string{96: "profile-level-id=42e01f;packetization-mode=1"},
 		},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("BuildOffer returned error: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestBuildOfferAudioAndVideo(t *testing.T) {
 	offer, err := BuildOffer(net.ParseIP("198.51.100.44"), 14000, 14002, []pcapread.SDPMedia{
 		{Media: "audio", PayloadTypes: []int{8}, RTPMap: map[int]string{8: "PCMA/8000"}, FMTP: map[int]string{}},
 		{Media: "video", PayloadTypes: []int{102}, RTPMap: map[int]string{102: "H264/90000"}, FMTP: map[int]string{}},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("BuildOffer returned error: %v", err)
 	}
@@ -74,16 +74,35 @@ func TestBuildOfferAudioAndVideo(t *testing.T) {
 }
 
 func TestBuildOfferRejectsEmptyMedia(t *testing.T) {
-	_, err := BuildOffer(net.ParseIP("192.0.2.10"), 12000, 12002, nil)
+	_, err := BuildOffer(net.ParseIP("192.0.2.10"), 12000, 12002, nil, false)
 	if err == nil {
 		t.Fatalf("expected error for empty media")
 	}
 }
 
 func TestBuildOfferRejectsZeroPort(t *testing.T) {
-	_, err := BuildOffer(net.ParseIP("192.0.2.10"), 0, 12002, []pcapread.SDPMedia{{Media: "audio", PayloadTypes: []int{0}}})
+	_, err := BuildOffer(net.ParseIP("192.0.2.10"), 0, 12002, []pcapread.SDPMedia{{Media: "audio", PayloadTypes: []int{0}}}, false)
 	if err == nil {
 		t.Fatalf("expected error for zero port")
+	}
+}
+
+func TestBuildOfferBundleAdvertisesOnePortAndMediaIdentifiers(t *testing.T) {
+	offer, err := BuildOffer(net.ParseIP("198.51.100.44"), 14000, 14000, []pcapread.SDPMedia{
+		{Media: "audio", PayloadTypes: []int{0}, RTPMap: map[int]string{0: "PCMU/8000"}},
+		{Media: "video", PayloadTypes: []int{96}, RTPMap: map[int]string{96: "H264/90000"}},
+	}, true)
+	if err != nil {
+		t.Fatalf("BuildOffer returned error: %v", err)
+	}
+
+	mustContain(t, offer, "a=group:BUNDLE audio video\r\n")
+	mustContain(t, offer, "m=audio 14000 RTP/AVP 0\r\n")
+	mustContain(t, offer, "a=mid:audio\r\n")
+	mustContain(t, offer, "m=video 14000 RTP/AVP 96\r\n")
+	mustContain(t, offer, "a=mid:video\r\n")
+	if got := strings.Count(offer, "a=rtcp-mux\r\n"); got != 2 {
+		t.Fatalf("rtcp-mux count=%d, want 2", got)
 	}
 }
 

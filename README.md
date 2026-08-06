@@ -60,9 +60,11 @@ The app runs this sequence:
 13. wait matching ACK
 14. apply media destination from inbound INVITE SDP
 15. start RTP replay
-16. respond `200 OK` to in-dialog INFO while replay runs
-17. send BYE after replay and wait `200 OK`
-18. exit
+16. optionally send one in-dialog re-INVITE after `--reinvite-after`
+17. switch local RTP sockets and remote RTP destinations after the re-INVITE completes
+18. respond `200 OK` to in-dialog INFO while replay runs
+19. send BYE after replay and wait `200 OK`
+20. exit
 
 ## Mode-specific CLI semantics
 
@@ -71,10 +73,36 @@ The app runs this sequence:
 - In `inbound` mode, `--callee` is optional (not required).
 - In `inbound` mode, `--caller` is treated as local AoR for REGISTER and dialog identity.
 - `--ua` controls the SIP `User-Agent` header value emitted by the tool in generated SIP requests and SIP responses (default: `sip-tester`).
+- `--reinvite-after=<duration>` is available in inbound mode and sends one in-dialog re-INVITE after the given replay duration.
+- `--bundle` sends audio and video from one UDP socket. In inbound mode it applies to the new offer created by `--reinvite-after`.
+
+### Inbound re-INVITE and bundled media example
+
+```bash
+sip-tester \
+  --mode inbound \
+  --caller 1002 \
+  --host pbx.example.com:5060 \
+  --local-ip 192.168.1.11 \
+  --pcap call.pcap \
+  --ssrc-audio 0x11223344 \
+  --ssrc-video 0x55667788 \
+  --username 1002 \
+  --password secret \
+  --reinvite-after 15s \
+  --bundle
+```
+
+The re-INVITE advertises newly bound local RTP ports. The tool keeps using the
+previous transport while the transaction is pending, sends `ACK` for a
+successful `200 OK`, and then atomically switches both its local RTP sockets
+and the Asterisk RTP destinations parsed from the answer. The old sockets stay
+open until the call ends so delayed packets cannot be mistaken for descriptor
+reuse.
 
 ## RTP local sockets and SDP media ports
 
-After local IP/family selection, `sip-tester` allocates and binds two RTP UDP sockets on that exact local IP:
+After local IP/family selection, `sip-tester` normally allocates and binds two RTP UDP sockets on that exact local IP:
 
 - one socket for audio RTP,
 - one socket for video RTP.
@@ -86,6 +114,10 @@ Port behavior:
 - SDP `m=audio` and `m=video` advertise those exact bound ports,
 - the same bound sockets are used for actual RTP sending (audio on audio socket, video on video socket),
 - sockets stay open for the full call lifetime and are closed on shutdown/error.
+
+With `--bundle`, both media sections advertise the same port and include
+`a=group:BUNDLE`, `a=mid`, and `a=rtcp-mux`; audio and video packets are sent
+through the same bound UDP socket.
 
 ## Early media support (183 Session Progress)
 

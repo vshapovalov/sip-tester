@@ -89,16 +89,18 @@ func Run(args []string) error {
 		return fmt.Errorf("parse INVITE SDP: %w", err)
 	}
 
-	audioConn, videoConn, audioPort, videoPort, err := replay.BindMediaSockets(network, cfg.LocalIPParsed)
+	initialBundle := cfg.Bundle && cfg.Mode == "outbound"
+	audioConn, videoConn, audioPort, videoPort, err := replay.BindMediaSockets(network, cfg.LocalIPParsed, initialBundle)
 	if err != nil {
 		return fmt.Errorf("bind media sockets: %w", err)
 	}
-	defer audioConn.Close()
-	defer videoConn.Close()
+	mediaSockets := &mediaSocketPool{}
+	mediaSockets.Add(audioConn, videoConn)
+	defer mediaSockets.Close()
 	logger.Printf("bound RTP audio socket: %s:%d", cfg.LocalIPParsed.String(), audioPort)
 	logger.Printf("bound RTP video socket: %s:%d", cfg.LocalIPParsed.String(), videoPort)
 
-	offer, err := sdp.BuildOffer(cfg.LocalIPParsed, audioPort, videoPort, media)
+	offer, err := sdp.BuildOffer(cfg.LocalIPParsed, audioPort, videoPort, media, initialBundle)
 	if err != nil {
 		return fmt.Errorf("build SDP offer: %w", err)
 	}
@@ -109,21 +111,24 @@ func Run(args []string) error {
 	}
 	defer client.Close()
 
+	transportStore := &replay.MediaTransportStore{}
+	transportStore.Set(replay.MediaTransport{Sockets: replay.MediaSockets{AudioConn: audioConn, VideoConn: videoConn}})
 	setup := &runSetup{
 		logger:           logger,
 		cfg:              cfg,
+		network:          network,
 		localMedia:       media,
 		audioPort:        audioPort,
 		videoPort:        videoPort,
 		schedule:         schedule,
-		audioConn:        audioConn,
-		videoConn:        videoConn,
 		offer:            offer,
 		client:           client,
-		rtpStore:         &replay.MediaDestinationStore{},
+		transportStore:   transportStore,
+		mediaSockets:     mediaSockets,
+		bindMediaSockets: replay.BindMediaSockets,
 		replayController: nil,
 	}
-	setup.replayController = newReplayController(logger, schedule, setup.rtpStore, audioConn, videoConn)
+	setup.replayController = newReplayController(logger, schedule, transportStore)
 
 	if cfg.Mode == "inbound" {
 		logger.Println("mode=inbound")
@@ -135,15 +140,16 @@ func Run(args []string) error {
 type runSetup struct {
 	logger           *log.Logger
 	cfg              *config.Config
+	network          string
 	localMedia       []pcapread.SDPMedia
 	audioPort        int
 	videoPort        int
 	schedule         []replay.ScheduledPacket
-	audioConn        net.PacketConn
-	videoConn        net.PacketConn
 	offer            string
 	client           *sipclient.Client
-	rtpStore         *replay.MediaDestinationStore
+	transportStore   *replay.MediaTransportStore
+	mediaSockets     *mediaSocketPool
+	bindMediaSockets func(string, net.IP, bool) (net.PacketConn, net.PacketConn, int, int, error)
 	replayController *replayRunner
 }
 
@@ -159,7 +165,7 @@ func runOutbound(s *runSetup) error {
 		if err != nil {
 			return fmt.Errorf("183 SDP handling failed: %w", err)
 		}
-		s.rtpStore.Set(earlyDest)
+		s.transportStore.SetDestination(earlyDest)
 		s.logger.Printf("early media destination audio=%s video=%s", udpAddrString(earlyDest.AudioAddr), udpAddrString(earlyDest.VideoAddr))
 		if s.replayController.Start() {
 			s.logger.Println("early media started")
@@ -187,17 +193,18 @@ func runOutbound(s *runSetup) error {
 	if err != nil {
 		return fmt.Errorf("200 OK SDP handling failed: %w", err)
 	}
-	s.rtpStore.Set(finalDest)
+	s.transportStore.SetDestination(finalDest)
 	s.logger.Printf("final destination applied audio=%s video=%s", udpAddrString(finalDest.AudioAddr), udpAddrString(finalDest.VideoAddr))
 
 	dialog := s.client.NewDialog(cfg.Caller, cfg.Callee, inviteRes)
 
 	s.logger.Println("handle INFO")
 	infoCtx, infoCancel := context.WithCancel(context.Background())
-	go handleInfoLoop(infoCtx, s.logger, dialog)
+	infoDone := startInfoLoop(infoCtx, s.logger, dialog)
 
 	s.replayController.Wait()
 	infoCancel()
+	<-infoDone
 
 	if err := s.replayController.Err(); err != nil {
 		return fmt.Errorf("RTP replay: %w", err)
@@ -274,16 +281,20 @@ func runInbound(s *runSetup) error {
 	if err != nil {
 		return fmt.Errorf("INVITE SDP handling failed: %w", err)
 	}
-	s.rtpStore.Set(finalDest)
+	s.transportStore.SetDestination(finalDest)
 
 	s.logger.Println("start RTP replay")
 	s.replayController.Start()
 	infoCtx, infoCancel := context.WithCancel(context.Background())
-	infoDone := startInboundRequestLoop(infoCtx, dialog)
+	infoDone := startInboundRequestLoop(infoCtx, dialog, cfg.ReinviteAfter, func(ctx context.Context) error {
+		return s.applyReinvite(ctx, dialog)
+	})
 
 	s.replayController.Wait()
 	infoCancel()
-	<-infoDone
+	if err := <-infoDone; err != nil {
+		return err
+	}
 	if err := s.replayController.Err(); err != nil {
 		return fmt.Errorf("RTP replay: %w", err)
 	}
@@ -299,12 +310,85 @@ func runInbound(s *runSetup) error {
 	return nil
 }
 
+type reinviteDialog interface {
+	Reinvite(ctx context.Context, offerSDP string) (sipclient.SDPAnswer, error)
+}
+
+func (s *runSetup) applyReinvite(ctx context.Context, dialog reinviteDialog) error {
+	audioConn, videoConn, audioPort, videoPort, err := s.bindMediaSockets(s.network, s.cfg.LocalIPParsed, s.cfg.Bundle)
+	if err != nil {
+		return fmt.Errorf("bind re-INVITE media sockets: %w", err)
+	}
+	shouldRetainSockets := false
+	defer func() {
+		if !shouldRetainSockets {
+			closeMediaSockets(audioConn, videoConn)
+		}
+	}()
+
+	offer, err := sdp.BuildOffer(s.cfg.LocalIPParsed, audioPort, videoPort, s.localMedia, s.cfg.Bundle)
+	if err != nil {
+		return fmt.Errorf("build re-INVITE SDP offer: %w", err)
+	}
+	s.logger.Printf("send re-INVITE with RTP audio=%s:%d video=%s:%d bundle=%t", s.cfg.LocalIPParsed, audioPort, s.cfg.LocalIPParsed, videoPort, s.cfg.Bundle)
+	answer, err := dialog.Reinvite(ctx, offer)
+	if err != nil {
+		return err
+	}
+	destination, err := destinationFromSDP(answer, s.cfg.IPFamily, replay.MediaStateFinal, true)
+	if err != nil {
+		return fmt.Errorf("re-INVITE SDP handling failed: %w", err)
+	}
+
+	s.mediaSockets.Add(audioConn, videoConn)
+	shouldRetainSockets = true
+	s.transportStore.Set(replay.MediaTransport{
+		Sockets:     replay.MediaSockets{AudioConn: audioConn, VideoConn: videoConn},
+		Destination: destination,
+	})
+	s.logger.Printf("re-INVITE transport applied local_audio=%s:%d local_video=%s:%d remote_audio=%s remote_video=%s", s.cfg.LocalIPParsed, audioPort, s.cfg.LocalIPParsed, videoPort, udpAddrString(destination.AudioAddr), udpAddrString(destination.VideoAddr))
+	return nil
+}
+
+type mediaSocketPool struct {
+	connections []net.PacketConn
+}
+
+func (pool *mediaSocketPool) Add(audioConn, videoConn net.PacketConn) {
+	pool.connections = appendUniquePacketConn(pool.connections, audioConn)
+	pool.connections = appendUniquePacketConn(pool.connections, videoConn)
+}
+
+func (pool *mediaSocketPool) Close() {
+	for _, connection := range pool.connections {
+		_ = connection.Close()
+	}
+}
+
+func closeMediaSockets(audioConn, videoConn net.PacketConn) {
+	connections := appendUniquePacketConn(nil, audioConn)
+	connections = appendUniquePacketConn(connections, videoConn)
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+}
+
+func appendUniquePacketConn(connections []net.PacketConn, candidate net.PacketConn) []net.PacketConn {
+	if candidate == nil {
+		return connections
+	}
+	for _, connection := range connections {
+		if connection == candidate {
+			return connections
+		}
+	}
+	return append(connections, candidate)
+}
+
 type replayRunner struct {
 	logger    *log.Logger
 	schedule  []replay.ScheduledPacket
-	store     *replay.MediaDestinationStore
-	audioConn net.PacketConn
-	videoConn net.PacketConn
+	transport *replay.MediaTransportStore
 	mu        sync.Mutex
 	started   bool
 	wg        sync.WaitGroup
@@ -313,8 +397,8 @@ type replayRunner struct {
 	ptMap     replay.PayloadTypeMap
 }
 
-func newReplayController(logger *log.Logger, schedule []replay.ScheduledPacket, store *replay.MediaDestinationStore, audioConn, videoConn net.PacketConn) *replayRunner {
-	return &replayRunner{logger: logger, schedule: schedule, store: store, audioConn: audioConn, videoConn: videoConn}
+func newReplayController(logger *log.Logger, schedule []replay.ScheduledPacket, transport *replay.MediaTransportStore) *replayRunner {
+	return &replayRunner{logger: logger, schedule: schedule, transport: transport}
 }
 
 func (r *replayRunner) Start() bool {
@@ -346,7 +430,7 @@ func (r *replayRunner) Err() error {
 func (r *replayRunner) run() {
 	defer r.wg.Done()
 	r.logger.Println("replay started")
-	sender := replay.NewUDPSenderWithPTMap(r.audioConn, r.videoConn, r.store, r.ptMap)
+	sender := replay.NewUDPSenderWithTransport(r.transport, r.ptMap)
 	if err := sender.Replay(context.Background(), r.schedule); err != nil {
 		r.setErr(err)
 		return
@@ -527,21 +611,55 @@ func handleInfoLoop(ctx context.Context, logger *log.Logger, dialog *sipclient.D
 	}
 }
 
+func startInfoLoop(ctx context.Context, logger *log.Logger, dialog *sipclient.Dialog) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInfoLoop(ctx, logger, dialog)
+	}()
+	return done
+}
+
 type inboundRequestHandler interface {
 	HandleIncomingRequest(ctx context.Context) (string, error)
 }
 
-func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler) <-chan struct{} {
-	done := make(chan struct{})
+func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler, reinviteAfter time.Duration, reinvite func(context.Context) error) <-chan error {
+	done := make(chan error, 1)
 	go func() {
 		defer close(done)
+		reinviteAt := time.Time{}
+		if reinviteAfter > 0 {
+			reinviteAt = time.Now().Add(reinviteAfter)
+		}
 		for {
 			select {
 			case <-ctx.Done():
+				done <- nil
 				return
 			default:
 			}
-			waitCtx, cancel := context.WithTimeout(ctx, time.Second)
+
+			if !reinviteAt.IsZero() && !time.Now().Before(reinviteAt) {
+				reinviteCtx, cancel := context.WithTimeout(ctx, defaultStepTimeout)
+				err := reinvite(reinviteCtx)
+				cancel()
+				if err != nil {
+					done <- fmt.Errorf("re-INVITE: %w", err)
+					return
+				}
+				reinviteAt = time.Time{}
+				continue
+			}
+
+			waitDuration := time.Second
+			if !reinviteAt.IsZero() && time.Until(reinviteAt) < waitDuration {
+				waitDuration = time.Until(reinviteAt)
+			}
+			if waitDuration <= 0 {
+				continue
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, waitDuration)
 			method, err := dialog.HandleIncomingRequest(waitCtx)
 			cancel()
 			if err != nil {
@@ -555,6 +673,7 @@ func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler) 
 				continue
 			}
 			if method == "BYE" {
+				done <- nil
 				return
 			}
 		}
