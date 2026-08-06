@@ -347,6 +347,110 @@ func (d *InboundDialog) Bye(ctx context.Context) error {
 	return nil
 }
 
+func (d *InboundDialog) Reinvite(ctx context.Context, offerSDP string) (SDPAnswer, error) {
+	d.client.cseq++
+	reinvite, err := d.buildReinviteRequest(offerSDP)
+	if err != nil {
+		return SDPAnswer{}, err
+	}
+	if err := d.client.write(reinvite); err != nil {
+		return SDPAnswer{}, fmt.Errorf("send re-INVITE: %w", err)
+	}
+	response, err := d.client.waitForInviteResponse(ctx, nil)
+	if err != nil {
+		return SDPAnswer{}, fmt.Errorf("wait re-INVITE response: %w", err)
+	}
+	if response.StatusCode != 200 {
+		return SDPAnswer{}, fmt.Errorf("re-INVITE failed with %d %s", response.StatusCode, response.Reason)
+	}
+	answer, err := ParseSDP(response.Body)
+	if err != nil {
+		return SDPAnswer{}, fmt.Errorf("parse re-INVITE SDP answer: %w", err)
+	}
+	if contact := strings.TrimSpace(response.GetHeader("Contact")); contact != "" {
+		remoteTarget, err := parseNameAddrTarget(contact)
+		if err != nil {
+			return SDPAnswer{}, fmt.Errorf("parse re-INVITE Contact: %w", err)
+		}
+		d.remoteTarget = remoteTarget
+	}
+	ack := d.buildReinviteACK(response)
+	if err := d.client.write(ack); err != nil {
+		return SDPAnswer{}, fmt.Errorf("send re-INVITE ACK: %w", err)
+	}
+	return answer, nil
+}
+
+func (d *InboundDialog) buildReinviteRequest(offerSDP string) (*sip.Request, error) {
+	contact, err := BuildRegisterContact(d.fromURI, d.client.localAddr)
+	if err != nil {
+		return nil, fmt.Errorf("build re-INVITE Contact: %w", err)
+	}
+	headers := map[string]string{
+		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
+		"Max-Forwards": "70",
+		"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.localTag),
+		"To":           d.remoteTo,
+		"Call-ID":      d.callID,
+		"CSeq":         fmt.Sprintf("%d INVITE", d.client.cseq),
+		"Contact":      fmt.Sprintf("<%s>", contact),
+		"Content-Type": "application/sdp",
+		"User-Agent":   d.client.userAgent,
+	}
+	headerFields := []sip.Header{
+		{Name: "Via", Value: headers["Via"]},
+		{Name: "Max-Forwards", Value: headers["Max-Forwards"]},
+		{Name: "From", Value: headers["From"]},
+		{Name: "To", Value: headers["To"]},
+		{Name: "Call-ID", Value: headers["Call-ID"]},
+		{Name: "CSeq", Value: headers["CSeq"]},
+		{Name: "Contact", Value: headers["Contact"]},
+		{Name: "Content-Type", Value: headers["Content-Type"]},
+		{Name: "User-Agent", Value: headers["User-Agent"]},
+	}
+	for _, route := range d.routeSet {
+		headerFields = append(headerFields, sip.Header{Name: "Route", Value: route})
+	}
+	if len(d.routeSet) > 0 {
+		headers["Route"] = strings.Join(d.routeSet, ", ")
+	}
+	return &sip.Request{
+		Method:       "INVITE",
+		URI:          d.remoteTarget,
+		Headers:      headers,
+		HeaderFields: headerFields,
+		Body:         offerSDP,
+	}, nil
+}
+
+func (d *InboundDialog) buildReinviteACK(response *sip.Response) *sip.Request {
+	headers := map[string]string{
+		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
+		"Max-Forwards": "70",
+		"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.localTag),
+		"To":           response.GetHeader("To"),
+		"Call-ID":      d.callID,
+		"CSeq":         fmt.Sprintf("%d ACK", d.client.cseq),
+		"User-Agent":   d.client.userAgent,
+	}
+	headerFields := []sip.Header{
+		{Name: "Via", Value: headers["Via"]},
+		{Name: "Max-Forwards", Value: headers["Max-Forwards"]},
+		{Name: "From", Value: headers["From"]},
+		{Name: "To", Value: headers["To"]},
+		{Name: "Call-ID", Value: headers["Call-ID"]},
+		{Name: "CSeq", Value: headers["CSeq"]},
+		{Name: "User-Agent", Value: headers["User-Agent"]},
+	}
+	for _, route := range d.routeSet {
+		headerFields = append(headerFields, sip.Header{Name: "Route", Value: route})
+	}
+	if len(d.routeSet) > 0 {
+		headers["Route"] = strings.Join(d.routeSet, ", ")
+	}
+	return &sip.Request{Method: "ACK", URI: d.remoteTarget, Headers: headers, HeaderFields: headerFields}
+}
+
 func (d *InboundDialog) buildByeRequest() *sip.Request {
 	headers := map[string]string{
 		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
