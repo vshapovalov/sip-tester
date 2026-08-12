@@ -287,6 +287,46 @@ func (d *InboundDialog) WaitForACK(ctx context.Context) error {
 	}
 }
 
+func (d *InboundDialog) WaitForCancel(ctx context.Context, invite *sip.Request) (bool, error) {
+	for {
+		deadline, hasDeadline := ctx.Deadline()
+		if hasDeadline {
+			_ = d.client.conn.SetReadDeadline(deadline)
+		} else {
+			_ = d.client.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		}
+		buffer := make([]byte, readBufferSize)
+		readCount, address, err := d.client.conn.ReadFromUDP(buffer)
+		if err != nil {
+			if networkError, ok := err.(net.Error); ok && networkError.Timeout() && hasDeadline {
+				return false, nil
+			}
+			return false, err
+		}
+		request, _, err := sip.ParseMessage(buffer[:readCount])
+		if err != nil || request == nil || request.Method != "CANCEL" || !d.cancelMatchesInvite(request, invite) {
+			continue
+		}
+		if err := d.respondOKToRequest(request, address); err != nil {
+			return false, fmt.Errorf("send 200 for CANCEL: %w", err)
+		}
+		return true, nil
+	}
+}
+
+func (d *InboundDialog) cancelMatchesInvite(cancelRequest, invite *sip.Request) bool {
+	if cancelRequest.GetHeader("Call-ID") != invite.GetHeader("Call-ID") || extractTag(cancelRequest.GetHeader("From")) != d.remoteTag {
+		return false
+	}
+	cancelCSeq := strings.Fields(cancelRequest.GetHeader("CSeq"))
+	inviteCSeq := strings.Fields(invite.GetHeader("CSeq"))
+	if len(cancelCSeq) != 2 || len(inviteCSeq) != 2 || cancelCSeq[0] != inviteCSeq[0] {
+		return false
+	}
+	toTag := extractTag(cancelRequest.GetHeader("To"))
+	return toTag == "" || toTag == d.localTag
+}
+
 func (d *InboundDialog) HandleIncomingRequest(ctx context.Context) (string, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = d.client.conn.SetReadDeadline(deadline)
@@ -306,29 +346,33 @@ func (d *InboundDialog) HandleIncomingRequest(ctx context.Context) (string, erro
 		return "", fmt.Errorf("request did not match dialog")
 	}
 	switch req.Method {
-	case "INFO", "BYE":
-		headerFields := make([]sip.Header, 0, 8)
-		for _, via := range req.HeaderValues("Via") {
-			headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
-		}
-		headerFields = append(headerFields,
-			sip.Header{Name: "From", Value: req.GetHeader("From")},
-			sip.Header{Name: "To", Value: req.GetHeader("To")},
-			sip.Header{Name: "Call-ID", Value: req.GetHeader("Call-ID")},
-			sip.Header{Name: "CSeq", Value: req.GetHeader("CSeq")},
-			sip.Header{Name: "User-Agent", Value: d.client.userAgent},
-		)
-		resp := &sip.Response{StatusCode: 200, Reason: "OK", Headers: map[string]string{
-			"From": req.GetHeader("From"), "To": req.GetHeader("To"), "Call-ID": req.GetHeader("Call-ID"), "CSeq": req.GetHeader("CSeq"), "User-Agent": d.client.userAgent,
-		}, HeaderFields: headerFields}
-		_, err = d.client.conn.WriteToUDP(sip.BuildResponse(resp), addr)
-		if err != nil {
+	case "INFO", "BYE", "CANCEL":
+		if err := d.respondOKToRequest(req, addr); err != nil {
 			return "", err
 		}
 		return req.Method, nil
 	default:
 		return "", fmt.Errorf("unsupported method %s", req.Method)
 	}
+}
+
+func (d *InboundDialog) respondOKToRequest(request *sip.Request, address *net.UDPAddr) error {
+	headerFields := make([]sip.Header, 0, 8)
+	for _, via := range request.HeaderValues("Via") {
+		headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
+	}
+	headerFields = append(headerFields,
+		sip.Header{Name: "From", Value: request.GetHeader("From")},
+		sip.Header{Name: "To", Value: request.GetHeader("To")},
+		sip.Header{Name: "Call-ID", Value: request.GetHeader("Call-ID")},
+		sip.Header{Name: "CSeq", Value: request.GetHeader("CSeq")},
+		sip.Header{Name: "User-Agent", Value: d.client.userAgent},
+	)
+	response := &sip.Response{StatusCode: 200, Reason: "OK", Headers: map[string]string{
+		"From": request.GetHeader("From"), "To": request.GetHeader("To"), "Call-ID": request.GetHeader("Call-ID"), "CSeq": request.GetHeader("CSeq"), "User-Agent": d.client.userAgent,
+	}, HeaderFields: headerFields}
+	_, err := d.client.conn.WriteToUDP(sip.BuildResponse(response), address)
+	return err
 }
 
 func (d *InboundDialog) Bye(ctx context.Context) error {
@@ -356,7 +400,7 @@ func (d *InboundDialog) Reinvite(ctx context.Context, offerSDP string) (SDPAnswe
 	if err := d.client.write(reinvite); err != nil {
 		return SDPAnswer{}, fmt.Errorf("send re-INVITE: %w", err)
 	}
-	response, err := d.client.waitForInviteResponse(ctx, nil)
+	response, err := d.client.waitForInviteResponse(ctx, nil, reinvite, time.Time{})
 	if err != nil {
 		return SDPAnswer{}, fmt.Errorf("wait re-INVITE response: %w", err)
 	}
