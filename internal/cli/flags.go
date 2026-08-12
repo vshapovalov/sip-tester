@@ -31,6 +31,8 @@ func ParseArgs(args []string) (*config.Config, error) {
 	fs.StringVar(&cfg.SSRCAudioRaw, "ssrc-audio", "", "audio SSRC (decimal or hex, e.g. 0x11223344)")
 	fs.StringVar(&cfg.SSRCVideoRaw, "ssrc-video", "", "video SSRC (decimal or hex, e.g. 0x11223344)")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug output")
+	fs.BoolVar(&cfg.Bundle, "bundle", false, "send audio and video RTP through one UDP socket")
+	fs.DurationVar(&cfg.ReinviteAfter, "reinvite-after", 0, "initiate an inbound-dialog re-INVITE after this delay")
 	fs.StringVar(&cfg.Username, "username", "", "SIP digest auth username")
 	fs.StringVar(&cfg.Password, "password", "", "SIP digest auth password")
 	fs.Func("header", "additional SIP header in name:value form (repeatable)", func(raw string) error {

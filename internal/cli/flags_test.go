@@ -225,6 +225,31 @@ func TestParseArgs_AcceptsLifecycleControls(t *testing.T) {
 	}
 }
 
+func TestParseArgs_InboundReinviteAndBundle(t *testing.T) {
+	cfg, err := ParseArgs([]string{
+		"--mode", "inbound", "--caller", "1001", "--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.10", "--pcap", "sample.pcap", "--ssrc-audio", "287454020",
+		"--bundle", "--reinvite-after", "15s",
+	})
+	if err != nil {
+		t.Fatalf("ParseArgs error: %v", err)
+	}
+	if !cfg.Bundle || cfg.ReinviteAfter != 15*time.Second {
+		t.Fatalf("bundle=%t reinvite-after=%s", cfg.Bundle, cfg.ReinviteAfter)
+	}
+}
+
+func TestParseArgs_ReinviteRequiresInboundMode(t *testing.T) {
+	_, err := ParseArgs([]string{
+		"--caller", "1001", "--callee", "1002", "--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.10", "--pcap", "sample.pcap", "--ssrc-audio", "287454020",
+		"--reinvite-after", "15s",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--reinvite-after requires --mode inbound") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParseArgs_AcceptsInboundTimingControls(t *testing.T) {
 	cfg, err := ParseArgs([]string{
 		"--mode", "inbound",

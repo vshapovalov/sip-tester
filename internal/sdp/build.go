@@ -29,7 +29,7 @@ type NegotiatedMedia struct {
 
 // BuildOffer builds a fresh SDP offer using parsed media metadata and a caller-provided local IP.
 // It intentionally does not preserve original transport addresses, ICE attributes, or crypto lines.
-func BuildOffer(localIP net.IP, audioPort, videoPort int, media []pcapread.SDPMedia) (string, error) {
+func BuildOffer(localIP net.IP, audioPort, videoPort int, media []pcapread.SDPMedia, bundle bool) (string, error) {
 	if localIP == nil {
 		return "", fmt.Errorf("local IP is required")
 	}
@@ -62,6 +62,13 @@ func BuildOffer(localIP net.IP, audioPort, videoPort int, media []pcapread.SDPMe
 		fmt.Sprintf("c=IN %s %s", ipFamily, localIP.String()),
 		"t=0 0",
 	}
+	if bundle {
+		bundleMedia := make([]string, 0, len(sections))
+		for _, mediaSection := range sections {
+			bundleMedia = append(bundleMedia, mediaSection.Media)
+		}
+		lines = append(lines, "a=group:BUNDLE "+strings.Join(bundleMedia, " "))
+	}
 
 	for _, m := range sections {
 		port := audioPort
@@ -80,6 +87,9 @@ func BuildOffer(localIP net.IP, audioPort, videoPort int, media []pcapread.SDPMe
 		}
 
 		lines = append(lines, fmt.Sprintf("m=%s %d RTP/AVP %s", m.Media, port, strings.Join(payloadStrings, " ")))
+		if bundle {
+			lines = append(lines, "a=mid:"+m.Media, "a=rtcp-mux")
+		}
 
 		for _, pt := range pts {
 			if v, ok := m.RTPMap[pt]; ok {

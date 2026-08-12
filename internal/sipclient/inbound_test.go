@@ -398,6 +398,65 @@ func TestInboundDialogBye_WaitsFor200OK(t *testing.T) {
 	}
 }
 
+func TestInboundDialogReinviteSendsOfferAndAcknowledgesAnswer(t *testing.T) {
+	server := mustListenUDP(t)
+	defer server.Close()
+	client := mustNewClientForServer(t, server)
+	defer client.Close()
+	dialog := &InboundDialog{
+		client:       client,
+		fromURI:      "sip:alice@example.com",
+		callID:       "call-reinvite",
+		localTag:     "ltag",
+		remoteTag:    "rtag",
+		remoteTo:     "<sip:bob@example.net>;tag=rtag",
+		remoteTarget: "sip:bob@127.0.0.1:5090",
+		routeSet:     []string{"<sip:127.0.0.1:5060;lr>"},
+	}
+	offer := "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 12000 RTP/AVP 0\r\n"
+	answer := "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 22000 RTP/AVP 0\r\n"
+	serverResult := make(chan error, 1)
+	go func() {
+		request, addr := readRequestFromServer(t, server)
+		if request.Method != "INVITE" || request.Body != offer {
+			serverResult <- fmt.Errorf("unexpected re-INVITE: method=%s body=%q", request.Method, request.Body)
+			return
+		}
+		if request.GetHeader("Call-ID") != "call-reinvite" || request.GetHeader("CSeq") != "2 INVITE" {
+			serverResult <- fmt.Errorf("unexpected dialog headers: call-id=%q cseq=%q", request.GetHeader("Call-ID"), request.GetHeader("CSeq"))
+			return
+		}
+		response := &sip.Response{StatusCode: 200, Reason: "OK", Headers: map[string]string{
+			"Via": request.GetHeader("Via"), "From": request.GetHeader("From"), "To": request.GetHeader("To"),
+			"Call-ID": request.GetHeader("Call-ID"), "CSeq": request.GetHeader("CSeq"),
+			"Contact": "<sip:bob@127.0.0.1:5090>", "Content-Type": "application/sdp",
+		}, Body: answer}
+		if _, err := server.WriteToUDP(sip.BuildResponse(response), addr); err != nil {
+			serverResult <- err
+			return
+		}
+		ack, _ := readRequestFromServer(t, server)
+		if ack.Method != "ACK" || ack.GetHeader("CSeq") != "2 ACK" {
+			serverResult <- fmt.Errorf("unexpected ACK: method=%s cseq=%q", ack.Method, ack.GetHeader("CSeq"))
+			return
+		}
+		serverResult <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := dialog.Reinvite(ctx, offer)
+	if err != nil {
+		t.Fatalf("Reinvite error: %v", err)
+	}
+	if len(got.Media) != 1 || got.Media[0].Port != 22000 {
+		t.Fatalf("answer media=%#v", got.Media)
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatalf("server handling error: %v", err)
+	}
+}
+
 func TestWaitForInvite_DoesNotChallengeUnauthenticatedInvite(t *testing.T) {
 	server := mustListenUDP(t)
 	defer server.Close()

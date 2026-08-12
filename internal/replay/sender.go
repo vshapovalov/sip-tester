@@ -23,21 +23,44 @@ type MediaDestination struct {
 	State     MediaState
 }
 
-type MediaDestinationStore struct {
-	mu   sync.RWMutex
-	dest MediaDestination
+type MediaSockets struct {
+	AudioConn net.PacketConn
+	VideoConn net.PacketConn
 }
 
-func (s *MediaDestinationStore) Set(dest MediaDestination) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.dest = copyMediaDestination(dest)
+type MediaTransport struct {
+	Sockets     MediaSockets
+	Destination MediaDestination
 }
 
-func (s *MediaDestinationStore) Get() MediaDestination {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return copyMediaDestination(s.dest)
+type MediaTransportStore struct {
+	mu        sync.RWMutex
+	transport MediaTransport
+}
+
+func (store *MediaTransportStore) Set(transport MediaTransport) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.transport = copyMediaTransport(transport)
+}
+
+func (store *MediaTransportStore) SetDestination(destination MediaDestination) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.transport.Destination = copyMediaDestination(destination)
+}
+
+func (store *MediaTransportStore) Get() MediaTransport {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	return copyMediaTransport(store.transport)
+}
+
+func copyMediaTransport(transport MediaTransport) MediaTransport {
+	return MediaTransport{
+		Sockets:     transport.Sockets,
+		Destination: copyMediaDestination(transport.Destination),
+	}
 }
 
 func copyMediaDestination(dest MediaDestination) MediaDestination {
@@ -54,12 +77,10 @@ func copyMediaDestination(dest MediaDestination) MediaDestination {
 }
 
 type UDPSender struct {
-	audioConn    net.PacketConn
-	videoConn    net.PacketConn
-	destinations *MediaDestinationStore
-	ptMap        PayloadTypeMap
-	now          func() time.Time
-	sleep        func(time.Duration)
+	transport *MediaTransportStore
+	ptMap     PayloadTypeMap
+	now       func() time.Time
+	sleep     func(time.Duration)
 }
 
 type PayloadTypeMap struct {
@@ -67,17 +88,22 @@ type PayloadTypeMap struct {
 	Video map[uint8]uint8
 }
 
-func NewUDPSender(audioConn, videoConn net.PacketConn, destinations *MediaDestinationStore) *UDPSender {
-	return NewUDPSenderWithPTMap(audioConn, videoConn, destinations, PayloadTypeMap{})
+func NewUDPSender(audioConn, videoConn net.PacketConn, transport *MediaTransportStore) *UDPSender {
+	return NewUDPSenderWithPTMap(audioConn, videoConn, transport, PayloadTypeMap{})
 }
 
-func NewUDPSenderWithPTMap(audioConn, videoConn net.PacketConn, destinations *MediaDestinationStore, ptMap PayloadTypeMap) *UDPSender {
+func NewUDPSenderWithPTMap(audioConn, videoConn net.PacketConn, transport *MediaTransportStore, ptMap PayloadTypeMap) *UDPSender {
+	current := transport.Get()
+	current.Sockets = MediaSockets{AudioConn: audioConn, VideoConn: videoConn}
+	transport.Set(current)
+	return NewUDPSenderWithTransport(transport, ptMap)
+}
+
+func NewUDPSenderWithTransport(transport *MediaTransportStore, ptMap PayloadTypeMap) *UDPSender {
 	return &UDPSender{
-		audioConn:    audioConn,
-		videoConn:    videoConn,
-		destinations: destinations,
-		ptMap:        copyPayloadTypeMap(ptMap),
-		now:          time.Now,
+		transport: transport,
+		ptMap:     copyPayloadTypeMap(ptMap),
+		now:       time.Now,
 		sleep: func(d time.Duration) {
 			time.Sleep(d)
 		},
@@ -100,13 +126,13 @@ func (s *UDPSender) Replay(ctx context.Context, schedule []ScheduledPacket) erro
 			return err
 		}
 
-		dest := s.destinations.Get()
-		addr := destinationForPacket(dest, item)
+		transport := s.transport.Get()
+		addr := destinationForPacket(transport.Destination, item)
 		if addr == nil {
 			continue
 		}
 
-		conn := s.connForMedia(item.MediaType)
+		conn := connForMedia(transport.Sockets, item.MediaType)
 		if conn == nil {
 			continue
 		}
@@ -161,12 +187,12 @@ func (m PayloadTypeMap) mapPayloadType(mediaType MediaType, original uint8) (uin
 	}
 }
 
-func (s *UDPSender) connForMedia(mediaType MediaType) net.PacketConn {
+func connForMedia(sockets MediaSockets, mediaType MediaType) net.PacketConn {
 	switch mediaType {
 	case MediaTypeAudio:
-		return s.audioConn
+		return sockets.AudioConn
 	case MediaTypeVideo:
-		return s.videoConn
+		return sockets.VideoConn
 	default:
 		return nil
 	}

@@ -21,6 +21,8 @@ type Config struct {
 	SSRCAudioRaw             string
 	SSRCVideoRaw             string
 	Debug                    bool
+	Bundle                   bool
+	ReinviteAfter            time.Duration
 	Username                 string
 	Password                 string
 	Headers                  map[string]string
@@ -113,6 +115,15 @@ func (c *Config) ValidateRequired() error {
 	}
 	if c.RequireFinalVideoPackets > 0 && c.RejectAfter > 0 {
 		return fmt.Errorf("--require-final-video-packets cannot be used with --reject-after")
+	}
+	if c.ReinviteAfter < 0 {
+		return fmt.Errorf("--reinvite-after must not be negative")
+	}
+	if c.ReinviteAfter > 0 && c.Mode != "inbound" {
+		return fmt.Errorf("--reinvite-after requires --mode inbound")
+	}
+	if c.Bundle && c.Mode == "inbound" && c.ReinviteAfter == 0 {
+		return fmt.Errorf("--bundle in inbound mode requires --reinvite-after")
 	}
 	return nil
 }

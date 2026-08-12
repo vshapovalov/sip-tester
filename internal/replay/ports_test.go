@@ -6,7 +6,7 @@ import (
 )
 
 func TestBindMediaSockets(t *testing.T) {
-	audioConn, videoConn, audioPort, videoPort, err := BindMediaSockets("udp4", net.ParseIP("127.0.0.1"))
+	audioConn, videoConn, audioPort, videoPort, err := BindMediaSockets("udp4", net.ParseIP("127.0.0.1"), false)
 	if err != nil {
 		t.Fatalf("BindMediaSockets returned error: %v", err)
 	}
@@ -24,5 +24,20 @@ func TestBindMediaSockets(t *testing.T) {
 	}
 	if audioPort == videoPort {
 		t.Fatalf("ports must be distinct")
+	}
+}
+
+func TestBindMediaSocketsBundleUsesOneSocketAndPort(t *testing.T) {
+	audioConn, videoConn, audioPort, videoPort, err := BindMediaSockets("udp4", net.ParseIP("127.0.0.1"), true)
+	if err != nil {
+		t.Fatalf("BindMediaSockets returned error: %v", err)
+	}
+	defer audioConn.Close()
+
+	if audioConn != videoConn {
+		t.Fatal("bundled media must share one socket")
+	}
+	if audioPort != videoPort {
+		t.Fatalf("bundled ports differ: audio=%d video=%d", audioPort, videoPort)
 	}
 }
