@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"sip-tester/internal/netutil"
 )
@@ -17,11 +18,19 @@ type Config struct {
 	LocalIP   string
 	PCAP      string
 
-	SSRCAudioRaw string
-	SSRCVideoRaw string
-	Debug        bool
-	Username     string
-	Password     string
+	SSRCAudioRaw             string
+	SSRCVideoRaw             string
+	Debug                    bool
+	Username                 string
+	Password                 string
+	Headers                  map[string]string
+	CancelAfter              time.Duration
+	AnswerAfter              time.Duration
+	RejectAfter              time.Duration
+	RegisteredWait           time.Duration
+	EarlyMedia               bool
+	RequireEarlyVideoPackets int
+	RequireFinalVideoPackets int
 
 	Caller string
 	Callee string
@@ -65,6 +74,45 @@ func (c *Config) ValidateRequired() error {
 	}
 	if (c.Username == "") != (c.Password == "") {
 		return fmt.Errorf("--username and --password must be provided together")
+	}
+	if c.Mode == "inbound" && c.CancelAfter > 0 {
+		return fmt.Errorf("--cancel-after is only valid in outbound mode")
+	}
+	if c.Mode == "outbound" && c.AnswerAfter > 0 {
+		return fmt.Errorf("--answer-after is only valid in inbound mode")
+	}
+	if c.Mode == "outbound" && c.RejectAfter > 0 {
+		return fmt.Errorf("--reject-after is only valid in inbound mode")
+	}
+	if c.AnswerAfter > 0 && c.RejectAfter > 0 {
+		return fmt.Errorf("--answer-after and --reject-after cannot be used together")
+	}
+	if c.Mode == "outbound" && c.RegisteredWait > 0 {
+		return fmt.Errorf("--registered-wait is only valid in inbound mode")
+	}
+	if c.Mode == "outbound" && c.EarlyMedia {
+		return fmt.Errorf("--early-media is only valid in inbound mode")
+	}
+	if c.RequireEarlyVideoPackets < 0 {
+		return fmt.Errorf("--require-early-video-packets cannot be negative")
+	}
+	if c.RequireEarlyVideoPackets > 0 && !c.EarlyMedia {
+		return fmt.Errorf("--require-early-video-packets requires --early-media")
+	}
+	if c.RequireEarlyVideoPackets > 0 && c.SSRCVideoRaw == "" {
+		return fmt.Errorf("--require-early-video-packets requires --ssrc-video")
+	}
+	if c.RequireFinalVideoPackets < 0 {
+		return fmt.Errorf("--require-final-video-packets cannot be negative")
+	}
+	if c.Mode == "outbound" && c.RequireFinalVideoPackets > 0 {
+		return fmt.Errorf("--require-final-video-packets is only valid in inbound mode")
+	}
+	if c.RequireFinalVideoPackets > 0 && c.SSRCVideoRaw == "" {
+		return fmt.Errorf("--require-final-video-packets requires --ssrc-video")
+	}
+	if c.RequireFinalVideoPackets > 0 && c.RejectAfter > 0 {
+		return fmt.Errorf("--require-final-video-packets cannot be used with --reject-after")
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package sipclient
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -294,6 +295,66 @@ func TestHandleIncomingRequest_INFOGets200OK(t *testing.T) {
 	}
 	if got := <-result; got != "INFO" {
 		t.Fatalf("HandleIncomingRequest()=%q", got)
+	}
+}
+
+func TestWaitForCancelRespondsAndMatchesInviteTransaction(t *testing.T) {
+	server := mustListenUDP(t)
+	defer server.Close()
+
+	client := mustNewClientForServer(t, server)
+	defer client.Close()
+	dialog := &InboundDialog{client: client, callID: "call-cancel", remoteTag: "rtag", localTag: "ltag"}
+	invite := &sip.Request{Method: "INVITE", Headers: map[string]string{
+		"Via": "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-cancel", "From": "<sip:bob@example.net>;tag=rtag",
+		"To": "<sip:alice@example.com>", "Call-ID": "call-cancel", "CSeq": "7 INVITE",
+	}}
+
+	result := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		cancelled, err := dialog.WaitForCancel(ctx, invite)
+		if err != nil {
+			result <- err
+			return
+		}
+		if !cancelled {
+			result <- fmt.Errorf("CANCEL was not detected")
+			return
+		}
+		result <- nil
+	}()
+
+	sendRequestToClient(t, server, client.LocalAddr(), &sip.Request{
+		Method: "CANCEL",
+		URI:    "sip:alice@example.com",
+		Headers: map[string]string{
+			"Via": "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-cancel", "From": "<sip:bob@example.net>;tag=rtag",
+			"To": "<sip:alice@example.com>;tag=ltag", "Call-ID": "call-cancel", "CSeq": "7 CANCEL",
+		},
+	})
+	response := readResponseFromServer(t, server)
+	if response.StatusCode != 200 || response.GetHeader("CSeq") != "7 CANCEL" {
+		t.Fatalf("CANCEL response=%+v", response)
+	}
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitForCancelReturnsFalseWhenAnswerDelayExpires(t *testing.T) {
+	server := mustListenUDP(t)
+	defer server.Close()
+	client := mustNewClientForServer(t, server)
+	defer client.Close()
+	dialog := &InboundDialog{client: client, callID: "call-timeout", remoteTag: "rtag", localTag: "ltag"}
+	invite := &sip.Request{Method: "INVITE", Headers: map[string]string{"Call-ID": "call-timeout", "CSeq": "1 INVITE"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	cancelled, err := dialog.WaitForCancel(ctx, invite)
+	if err != nil || cancelled {
+		t.Fatalf("cancelled=%t err=%v", cancelled, err)
 	}
 }
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSSRC(t *testing.T) {
@@ -195,5 +196,158 @@ func TestParseArgs_UserAgentOverride(t *testing.T) {
 	}
 	if got, want := cfg.UA, "My-UA/2.0"; got != want {
 		t.Fatalf("ua=%q, want %q", got, want)
+	}
+}
+
+func TestParseArgs_AcceptsLifecycleControls(t *testing.T) {
+	cfg, err := ParseArgs([]string{
+		"--caller", "1001",
+		"--callee", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.10",
+		"--pcap", "sample.pcap",
+		"--ssrc-audio", "287454020",
+		"--header", "X-Speech-ID:repro-create-after-destroy",
+		"--header", "X-Test-Run:run-1",
+		"--cancel-after", "3s",
+	})
+	if err != nil {
+		t.Fatalf("ParseArgs error: %v", err)
+	}
+	if got := cfg.Headers["X-Speech-ID"]; got != "repro-create-after-destroy" {
+		t.Fatalf("X-Speech-ID=%q", got)
+	}
+	if got := cfg.Headers["X-Test-Run"]; got != "run-1" {
+		t.Fatalf("X-Test-Run=%q", got)
+	}
+	if cfg.CancelAfter != 3*time.Second {
+		t.Fatalf("cancel-after=%s", cfg.CancelAfter)
+	}
+}
+
+func TestParseArgs_AcceptsInboundTimingControls(t *testing.T) {
+	cfg, err := ParseArgs([]string{
+		"--mode", "inbound",
+		"--caller", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.11",
+		"--pcap", "sample.pcap",
+		"--ssrc-audio", "287454020",
+		"--answer-after", "750ms",
+		"--registered-wait", "20s",
+	})
+	if err != nil {
+		t.Fatalf("ParseArgs error: %v", err)
+	}
+	if cfg.AnswerAfter != 750*time.Millisecond {
+		t.Fatalf("answer-after=%s", cfg.AnswerAfter)
+	}
+	if cfg.RegisteredWait != 20*time.Second {
+		t.Fatalf("registered-wait=%s", cfg.RegisteredWait)
+	}
+}
+
+func TestParseArgs_AcceptsInboundEarlyMediaVideoVerification(t *testing.T) {
+	cfg, err := ParseArgs([]string{
+		"--mode", "inbound",
+		"--caller", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.11",
+		"--pcap", "sample.pcap",
+		"--ssrc-video", "0x259989ef",
+		"--early-media",
+		"--require-early-video-packets", "10",
+	})
+	if err != nil {
+		t.Fatalf("ParseArgs error: %v", err)
+	}
+	if !cfg.EarlyMedia {
+		t.Fatal("early media was not enabled")
+	}
+	if cfg.RequireEarlyVideoPackets != 10 {
+		t.Fatalf("required early video packets=%d", cfg.RequireEarlyVideoPackets)
+	}
+}
+
+func TestParseArgs_AcceptsInboundRejectAndFinalVideoVerification(t *testing.T) {
+	commonArguments := []string{
+		"--mode", "inbound",
+		"--caller", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.11",
+		"--pcap", "sample.pcap",
+		"--ssrc-video", "0x259989ef",
+		"--early-media",
+		"--require-early-video-packets", "10",
+	}
+	for _, lifecycleArguments := range [][]string{
+		{"--reject-after", "2s"},
+		{"--answer-after", "2s", "--require-final-video-packets", "20"},
+	} {
+		_, err := ParseArgs(append(append([]string(nil), commonArguments...), lifecycleArguments...))
+		if err != nil {
+			t.Fatalf("ParseArgs(%v) error: %v", lifecycleArguments, err)
+		}
+	}
+}
+
+func TestParseArgs_EarlyMediaDefaultsRemainDisabled(t *testing.T) {
+	cfg, err := ParseArgs([]string{
+		"--mode", "inbound",
+		"--caller", "1002",
+		"--host", "pbx.example.com:5060",
+		"--local-ip", "192.0.2.11",
+		"--pcap", "sample.pcap",
+		"--ssrc-audio", "287454020",
+	})
+	if err != nil {
+		t.Fatalf("ParseArgs error: %v", err)
+	}
+	if cfg.EarlyMedia || cfg.RequireEarlyVideoPackets != 0 {
+		t.Fatalf("unexpected early-media defaults: enabled=%t packets=%d", cfg.EarlyMedia, cfg.RequireEarlyVideoPackets)
+	}
+}
+
+func TestParseArgs_RejectsInvalidLifecycleControls(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments []string
+		wantError string
+	}{
+		{name: "malformed header", arguments: []string{"--header", "missing-separator"}, wantError: "--header"},
+		{name: "duplicate header", arguments: []string{"--header", "X-Test:first", "--header", "X-Test:second"}, wantError: "duplicate header"},
+		{name: "header injection", arguments: []string{"--header", "X-Test:ok\r\nRoute: attacker"}, wantError: "invalid header value"},
+		{name: "transaction header", arguments: []string{"--header", "Via:attacker"}, wantError: "managed by sip-tester"},
+		{name: "zero cancel delay", arguments: []string{"--cancel-after", "0s"}, wantError: "--cancel-after must be positive"},
+		{name: "cancel in inbound mode", arguments: []string{"--mode", "inbound", "--cancel-after", "1s"}, wantError: "--cancel-after is only valid in outbound mode"},
+		{name: "answer delay in outbound mode", arguments: []string{"--answer-after", "1s"}, wantError: "--answer-after is only valid in inbound mode"},
+		{name: "reject delay in outbound mode", arguments: []string{"--reject-after", "1s"}, wantError: "--reject-after is only valid in inbound mode"},
+		{name: "answer and reject together", arguments: []string{"--mode", "inbound", "--answer-after", "1s", "--reject-after", "1s"}, wantError: "--answer-after and --reject-after cannot be used together"},
+		{name: "early media in outbound mode", arguments: []string{"--early-media"}, wantError: "--early-media is only valid in inbound mode"},
+		{name: "negative early video packet count", arguments: []string{"--mode", "inbound", "--early-media", "--ssrc-video", "0x259989ef", "--require-early-video-packets", "-1"}, wantError: "--require-early-video-packets cannot be negative"},
+		{name: "packet requirement without early media", arguments: []string{"--mode", "inbound", "--ssrc-video", "0x259989ef", "--require-early-video-packets", "10"}, wantError: "--require-early-video-packets requires --early-media"},
+		{name: "packet requirement without video stream", arguments: []string{"--mode", "inbound", "--early-media", "--require-early-video-packets", "10"}, wantError: "--require-early-video-packets requires --ssrc-video"},
+		{name: "negative final video packet count", arguments: []string{"--mode", "inbound", "--ssrc-video", "0x259989ef", "--require-final-video-packets", "-1"}, wantError: "--require-final-video-packets cannot be negative"},
+		{name: "final video requirement in outbound mode", arguments: []string{"--ssrc-video", "0x259989ef", "--require-final-video-packets", "10"}, wantError: "--require-final-video-packets is only valid in inbound mode"},
+		{name: "final packet requirement without video stream", arguments: []string{"--mode", "inbound", "--require-final-video-packets", "10"}, wantError: "--require-final-video-packets requires --ssrc-video"},
+		{name: "final packet requirement on rejected call", arguments: []string{"--mode", "inbound", "--ssrc-video", "0x259989ef", "--reject-after", "1s", "--require-final-video-packets", "10"}, wantError: "--require-final-video-packets cannot be used with --reject-after"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			arguments := []string{
+				"--caller", "1001",
+				"--callee", "1002",
+				"--host", "pbx.example.com:5060",
+				"--local-ip", "192.0.2.10",
+				"--pcap", "sample.pcap",
+				"--ssrc-audio", "287454020",
+			}
+			arguments = append(arguments, test.arguments...)
+			_, err := ParseArgs(arguments)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error=%v, want containing %q", err, test.wantError)
+			}
+		})
 	}
 }
