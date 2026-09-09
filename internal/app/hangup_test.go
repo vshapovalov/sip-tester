@@ -52,7 +52,7 @@ func TestRemoteHangupWaitsAfterReplayAndStillAnswersINFO(t *testing.T) {
 		t.Run(callMode, func(t *testing.T) {
 			t.Parallel()
 			call := startHangupTestCall(t, callMode, "remote", 0)
-			call.setup.replayController.Wait()
+			<-call.setup.replayController.done
 			call.sendDialogRequest(t, "INFO")
 			call.requireResponse(t, "INFO")
 			select {
@@ -89,11 +89,66 @@ func TestReplayFailureFailsCallWithoutSendingBYE(t *testing.T) {
 	}
 }
 
+func TestFinalVideoRequirementDelaysLocalBYEUntilEnoughPackets(t *testing.T) {
+	call := startHangupTestCall(t, "inbound", "local", 0, hangupCallOptions{finalVideoPackets: 2})
+	call.sendVideoPackets(t, 1)
+	call.sendDialogRequest(t, "INFO")
+	call.requireResponse(t, "INFO")
+	call.sendVideoPackets(t, 1)
+	bye, _ := call.readSIP(t, 2*time.Second)
+	if bye == nil || bye.Method != "BYE" {
+		t.Fatalf("expected BYE after receiving required video, got %+v", bye)
+	}
+	call.respond(t, bye, "", "")
+	call.requireFinished(t, time.Second, "")
+}
+
+func TestRemoteBYEDoesNotHideMissingFinalVideo(t *testing.T) {
+	for _, hangupMode := range []string{"local", "remote"} {
+		t.Run(hangupMode, func(t *testing.T) {
+			t.Parallel()
+			call := startHangupTestCall(t, "inbound", hangupMode, 5*time.Second, hangupCallOptions{finalVideoPackets: 2})
+			call.sendDialogRequest(t, "BYE")
+			call.requireResponse(t, "BYE")
+			call.requireFinished(t, 2*time.Second, "required RTP packets")
+			call.requireNoLocalBYE(t)
+		})
+	}
+}
+
+func TestFinalVideoTimeoutFailsWithoutLocalBYE(t *testing.T) {
+	t.Parallel()
+	call := startHangupTestCall(t, "inbound", "local", 0, hangupCallOptions{finalVideoPackets: 2})
+	call.requireFinished(t, 18*time.Second, "received 0 of 2 required RTP packets")
+	call.requireNoLocalBYE(t)
+}
+
+func TestRemoteHangupDeadlineIncludesFinalVideoVerification(t *testing.T) {
+	t.Parallel()
+	call := startHangupTestCall(t, "inbound", "remote", 0, hangupCallOptions{finalVideoPackets: 1})
+	<-call.setup.replayController.done
+	hangupDeadline := time.Now().Add(16 * time.Second)
+	time.Sleep(4 * time.Second)
+	call.sendVideoPackets(t, 1)
+	call.requireFinished(t, time.Until(hangupDeadline), "wait for remote BYE")
+	call.requireNoLocalBYE(t)
+}
+
+func TestFinalVideoReadFailureFailsCallWithoutLocalBYE(t *testing.T) {
+	t.Parallel()
+	call := startHangupTestCall(t, "inbound", "local", 5*time.Second, hangupCallOptions{finalVideoPackets: 2})
+	if err := call.setup.transportStore.Get().Sockets.VideoConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	call.requireFinished(t, 2*time.Second, "verify final video RTP")
+	call.requireNoLocalBYE(t)
+}
+
 func TestRemoteBYEDuringReinviteStopsCall(t *testing.T) {
 	for _, hangupMode := range []string{"local", "remote"} {
 		t.Run(hangupMode, func(t *testing.T) {
 			t.Parallel()
-			call := startHangupTestCall(t, "inbound", hangupMode, 5*time.Second, 10*time.Millisecond)
+			call := startHangupTestCall(t, "inbound", hangupMode, 5*time.Second, hangupCallOptions{reinviteAfter: 10 * time.Millisecond})
 			reinvite, _ := call.readSIP(t, 2*time.Second)
 			if reinvite == nil || reinvite.Method != "INVITE" {
 				t.Fatalf("expected re-INVITE, got %+v", reinvite)
@@ -107,7 +162,7 @@ func TestRemoteBYEDuringReinviteStopsCall(t *testing.T) {
 }
 
 func TestLocalReplayCompletionSendsBYEWhileReinviteIsPending(t *testing.T) {
-	call := startHangupTestCall(t, "inbound", "local", 150*time.Millisecond, 10*time.Millisecond)
+	call := startHangupTestCall(t, "inbound", "local", 150*time.Millisecond, hangupCallOptions{reinviteAfter: 10 * time.Millisecond})
 	reinvite, _ := call.readSIP(t, 2*time.Second)
 	if reinvite == nil || reinvite.Method != "INVITE" {
 		t.Fatalf("expected re-INVITE, got %+v", reinvite)
@@ -121,8 +176,8 @@ func TestLocalReplayCompletionSendsBYEWhileReinviteIsPending(t *testing.T) {
 }
 
 func TestRemoteWaitDoesNotStartReinviteAfterReplay(t *testing.T) {
-	call := startHangupTestCall(t, "inbound", "remote", 0, 10*time.Millisecond)
-	call.setup.replayController.Wait()
+	call := startHangupTestCall(t, "inbound", "remote", 0, hangupCallOptions{reinviteAfter: 10 * time.Millisecond})
+	<-call.setup.replayController.done
 	if err := call.server.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +203,12 @@ type hangupTestCall struct {
 	to       string
 }
 
-func startHangupTestCall(t *testing.T, callMode, hangupMode string, replayDuration time.Duration, reinviteDelay ...time.Duration) *hangupTestCall {
+type hangupCallOptions struct {
+	reinviteAfter     time.Duration
+	finalVideoPackets int
+}
+
+func startHangupTestCall(t *testing.T, callMode, hangupMode string, replayDuration time.Duration, options ...hangupCallOptions) *hangupTestCall {
 	t.Helper()
 	server := listenHangupUDP(t)
 	mediaReceiver := listenHangupUDP(t)
@@ -177,8 +237,15 @@ func startHangupTestCall(t *testing.T, callMode, hangupMode string, replayDurati
 		localMedia: []pcapread.SDPMedia{{Media: "audio", PayloadTypes: []int{0}}},
 	}
 	t.Cleanup(setup.mediaSockets.Close)
-	if len(reinviteDelay) > 0 {
-		setup.cfg.ReinviteAfter = reinviteDelay[0]
+	if len(options) > 0 {
+		setup.cfg.ReinviteAfter = options[0].reinviteAfter
+		setup.cfg.RequireFinalVideoPackets = options[0].finalVideoPackets
+	}
+	if setup.cfg.RequireFinalVideoPackets > 0 {
+		videoReceiver := listenHangupUDP(t)
+		setup.videoPort = videoReceiver.LocalAddr().(*net.UDPAddr).Port
+		setup.localMedia = append(setup.localMedia, pcapread.SDPMedia{Media: "video", PayloadTypes: []int{96}})
+		transport.Set(replay.MediaTransport{Sockets: replay.MediaSockets{AudioConn: mediaSender, VideoConn: videoReceiver}})
 	}
 	schedule := []replay.ScheduledPacket{{MediaType: replay.MediaTypeAudio, Packet: pcapread.RTPPacket{SSRC: 1234}}}
 	if replayDuration > 0 {
@@ -195,6 +262,9 @@ func startHangupTestCall(t *testing.T, callMode, hangupMode string, replayDurati
 		}
 	}()
 	remoteSDP := fmt.Sprintf("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio %d RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n", mediaReceiver.LocalAddr().(*net.UDPAddr).Port)
+	if setup.cfg.RequireFinalVideoPackets > 0 {
+		remoteSDP += fmt.Sprintf("m=video %d RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n", mediaReceiver.LocalAddr().(*net.UDPAddr).Port)
+	}
 	initialRequest, _ := call.readSIP(t, 2*time.Second)
 	if initialRequest == nil {
 		t.Fatal("expected initial SIP request")
@@ -298,6 +368,16 @@ func (call *hangupTestCall) dialogRequest(method string) *sip.Request {
 func (call *hangupTestCall) sendDialogRequest(t *testing.T, method string) {
 	t.Helper()
 	call.send(t, sip.BuildRequest(call.dialogRequest(method)))
+}
+
+func (call *hangupTestCall) sendVideoPackets(t *testing.T, count int) {
+	t.Helper()
+	videoAddress := call.setup.transportStore.Get().Sockets.VideoConn.LocalAddr().(*net.UDPAddr)
+	for sequence := 1; sequence <= count; sequence++ {
+		if _, err := call.server.WriteToUDP(buildAppTestRTP(uint16(sequence)), videoAddress); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func (call *hangupTestCall) send(t *testing.T, packet []byte) {

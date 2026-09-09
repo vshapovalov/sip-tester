@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log"
@@ -21,7 +22,8 @@ import (
 )
 
 type fakeInboundRequestHandler struct {
-	calls atomic.Int32
+	calls  atomic.Int32
+	method string
 }
 
 type fakeReinviteDialog struct {
@@ -37,6 +39,9 @@ func (dialog *fakeReinviteDialog) Reinvite(_ context.Context, offer string) (sip
 
 func (f *fakeInboundRequestHandler) HandleIncomingRequest(ctx context.Context) (string, error) {
 	f.calls.Add(1)
+	if f.method != "" {
+		return f.method, nil
+	}
 	<-ctx.Done()
 	return "", ctx.Err()
 }
@@ -311,6 +316,81 @@ func TestRunSetupApplyReinvitePublishesBundledTransportAfterAnswer(t *testing.T)
 	if got := current.Destination.VideoAddr.String(); got != "127.0.0.1:22000" {
 		t.Fatalf("video destination=%s", got)
 	}
+}
+
+func TestOutboundInviteOptionsFromConfig(t *testing.T) {
+	options := outboundInviteOptions(&config.Config{Headers: map[string]string{"X-Speech-ID": "repro"}, CancelAfter: 2 * time.Second})
+	if options.Headers["X-Speech-ID"] != "repro" || options.CancelAfter != 2*time.Second {
+		t.Fatalf("options=%+v", options)
+	}
+}
+
+func TestInboundAnswerControls(t *testing.T) {
+	if got := inboundAnswerDelay(&config.Config{}); got != 3*time.Second {
+		t.Fatalf("default delay=%s", got)
+	}
+	if got := inboundAnswerDelay(&config.Config{AnswerAfter: 750 * time.Millisecond}); got != 750*time.Millisecond {
+		t.Fatalf("answer delay=%s", got)
+	}
+	if got := inboundAnswerDelay(&config.Config{RejectAfter: 500 * time.Millisecond}); got != 500*time.Millisecond {
+		t.Fatalf("reject delay=%s", got)
+	}
+	ringing := inboundProvisionalResponse(&config.Config{}, "v=0")
+	if ringing.statusCode != 180 || ringing.body != "" {
+		t.Fatalf("ringing=%+v", ringing)
+	}
+	earlyMedia := inboundProvisionalResponse(&config.Config{EarlyMedia: true}, "v=0")
+	if earlyMedia.statusCode != 183 || earlyMedia.body != "v=0" || earlyMedia.contentType != "application/sdp" {
+		t.Fatalf("early media=%+v", earlyMedia)
+	}
+}
+
+func TestWaitBeforeInboundAnswerVerifiesEarlyVideoPackets(t *testing.T) {
+	receiver := listenAppTestUDP(t)
+	sender := listenAppTestUDP(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	go func() {
+		for sequence := uint16(1); sequence <= 3; sequence++ {
+			_, _ = sender.WriteToUDP(buildAppTestRTP(sequence), receiver.LocalAddr().(*net.UDPAddr))
+		}
+	}()
+	wasCancelled, reception, err := waitBeforeInboundAnswer(ctx, func(ctx context.Context) (bool, error) {
+		<-ctx.Done()
+		return false, nil
+	}, receiver, 3)
+	if err != nil || wasCancelled || reception.PacketCount != 3 {
+		t.Fatalf("cancelled=%t reception=%+v error=%v", wasCancelled, reception, err)
+	}
+}
+
+func TestStartInboundRequestLoopReportsRemoteBye(t *testing.T) {
+	handler := &fakeInboundRequestHandler{method: "BYE"}
+	result := <-startDialogRequestLoop(context.Background(), handler, nil, 0, nil)
+	if result.err != nil || result.method != "BYE" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func listenAppTestUDP(t *testing.T) *net.UDPConn {
+	t.Helper()
+	connection, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen UDP: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	return connection
+}
+
+func buildAppTestRTP(sequence uint16) []byte {
+	packet := make([]byte, 13)
+	packet[0] = 2 << 6
+	packet[1] = 96
+	binary.BigEndian.PutUint16(packet[2:4], sequence)
+	binary.BigEndian.PutUint32(packet[4:8], uint32(sequence)*3000)
+	binary.BigEndian.PutUint32(packet[8:12], 0x259989ef)
+	packet[12] = 0x65
+	return packet
 }
 
 func TestPayloadTypeMapFromNegotiation(t *testing.T) {

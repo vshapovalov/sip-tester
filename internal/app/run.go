@@ -159,7 +159,7 @@ func runOutbound(s *runSetup) error {
 	defer cancel()
 
 	s.logger.Println("send INVITE")
-	inviteRes, err := s.client.SendInviteWithEarlyMedia(ctx, cfg.Caller, cfg.Callee, s.offer, func(answer sipclient.SDPAnswer) error {
+	inviteRes, err := s.client.SendInviteWithOptions(ctx, cfg.Caller, cfg.Callee, s.offer, outboundInviteOptions(cfg), func(answer sipclient.SDPAnswer) error {
 		s.logger.Println("early SDP detected (183 Session Progress)")
 		earlyDest, err := destinationFromSDP(answer, cfg.IPFamily, replay.MediaStateEarly, false)
 		if err != nil {
@@ -175,6 +175,10 @@ func runOutbound(s *runSetup) error {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, sipclient.ErrInviteCancelled) {
+			s.logger.Println("pending INVITE cancelled")
+			return nil
+		}
 		return err
 	}
 	s.logger.Println("200 OK received")
@@ -184,17 +188,16 @@ func runOutbound(s *runSetup) error {
 		return fmt.Errorf("send ACK: %w", err)
 	}
 
-	if !s.replayController.Started() {
-		s.logger.Println("start RTP replay")
-		s.replayController.Start()
-	}
-
 	finalDest, err := destinationFromSDP(inviteRes.SDPAnswer, cfg.IPFamily, replay.MediaStateFinal, true)
 	if err != nil {
 		return fmt.Errorf("200 OK SDP handling failed: %w", err)
 	}
 	s.transportStore.SetDestination(finalDest)
 	s.logger.Printf("final destination applied audio=%s video=%s", udpAddrString(finalDest.AudioAddr), udpAddrString(finalDest.VideoAddr))
+	if !s.replayController.Started() {
+		s.logger.Println("start RTP replay")
+		s.replayController.Start()
+	}
 
 	dialog := s.client.NewDialog(cfg.Caller, cfg.Callee, inviteRes)
 	return s.runEstablishedCall(dialog, 0, nil)
@@ -215,6 +218,17 @@ func runInbound(s *runSetup) error {
 		return err
 	}
 	s.logger.Println("REGISTER succeeded")
+	if cfg.RegisteredWait > 0 {
+		s.logger.Printf("holding registration for %s", cfg.RegisteredWait)
+		time.Sleep(cfg.RegisteredWait)
+		unregisterCtx, unregisterCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
+		defer unregisterCancel()
+		if err := s.client.Register(unregisterCtx, cfg.Caller, contact, 0); err != nil {
+			return fmt.Errorf("unregister: %w", err)
+		}
+		s.logger.Println("unregistered")
+		return nil
+	}
 
 	inviteCtx, inviteCancel := context.WithTimeout(context.Background(), 2*defaultStepTimeout)
 	defer inviteCancel()
@@ -239,11 +253,38 @@ func runInbound(s *runSetup) error {
 		return fmt.Errorf("create inbound dialog: %w", err)
 	}
 
-	s.logger.Println("send 180 Ringing")
-	if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 180, "Ringing", "", ""); err != nil {
-		return fmt.Errorf("send 180: %w", err)
+	provisionalResponse := inboundProvisionalResponse(cfg, answer)
+	s.logger.Printf("send %d %s", provisionalResponse.statusCode, provisionalResponse.reason)
+	if err := dialog.SendInviteResponse(inviteReq, inviteAddr, provisionalResponse.statusCode, provisionalResponse.reason, provisionalResponse.body, provisionalResponse.contentType); err != nil {
+		return fmt.Errorf("send %d: %w", provisionalResponse.statusCode, err)
 	}
-	time.Sleep(3 * time.Second)
+	initialVideoConnection := s.transportStore.Get().Sockets.VideoConn
+	answerDelayContext, answerDelayCancel := context.WithTimeout(context.Background(), inboundAnswerDelay(cfg))
+	inviteCancelled, earlyVideoReception, err := waitBeforeInboundAnswer(answerDelayContext, func(ctx context.Context) (bool, error) {
+		return dialog.WaitForCancel(ctx, inviteReq)
+	}, initialVideoConnection, cfg.RequireEarlyVideoPackets)
+	answerDelayCancel()
+	if err != nil {
+		return fmt.Errorf("wait before answer: %w", err)
+	}
+	if cfg.RequireEarlyVideoPackets > 0 {
+		s.logger.Printf("early video RTP verified packets=%d first=%s last=%s", earlyVideoReception.PacketCount, earlyVideoReception.FirstPacketAt.UTC().Format(time.RFC3339Nano), earlyVideoReception.LastPacketAt.UTC().Format(time.RFC3339Nano))
+	}
+	if inviteCancelled {
+		s.logger.Println("incoming INVITE cancelled")
+		if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 487, "Request Terminated", "", ""); err != nil {
+			return fmt.Errorf("send 487: %w", err)
+		}
+		return nil
+	}
+	if cfg.RejectAfter > 0 {
+		s.logger.Println("send 486 Busy Here")
+		if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 486, "Busy Here", "", ""); err != nil {
+			return fmt.Errorf("send 486: %w", err)
+		}
+		s.logger.Println("exit")
+		return nil
+	}
 	s.logger.Println("send 200 OK")
 	if err := dialog.SendInviteResponse(inviteReq, inviteAddr, 200, "OK", answer, "application/sdp"); err != nil {
 		return fmt.Errorf("send 200 OK: %w", err)
@@ -261,12 +302,75 @@ func runInbound(s *runSetup) error {
 		return fmt.Errorf("INVITE SDP handling failed: %w", err)
 	}
 	s.transportStore.SetDestination(finalDest)
+	if cfg.RequireFinalVideoPackets > 0 {
+		discardedPackets, err := replay.DiscardPendingPackets(initialVideoConnection)
+		if err != nil {
+			return fmt.Errorf("discard pre-answer video packets: %w", err)
+		}
+		s.logger.Printf("discarded pre-answer video packets=%d", discardedPackets)
+	}
 
 	s.logger.Println("start RTP replay")
 	s.replayController.Start()
 	return s.runEstablishedCall(dialog, cfg.ReinviteAfter, func(ctx context.Context) error {
 		return s.applyReinvite(ctx, dialog)
 	})
+}
+
+func outboundInviteOptions(cfg *config.Config) sipclient.InviteOptions {
+	return sipclient.InviteOptions{Headers: cfg.Headers, CancelAfter: cfg.CancelAfter}
+}
+
+func inboundAnswerDelay(cfg *config.Config) time.Duration {
+	if cfg.RejectAfter > 0 {
+		return cfg.RejectAfter
+	}
+	if cfg.AnswerAfter > 0 {
+		return cfg.AnswerAfter
+	}
+	return 3 * time.Second
+}
+
+type provisionalInviteResponse struct {
+	statusCode  int
+	reason      string
+	body        string
+	contentType string
+}
+
+func inboundProvisionalResponse(cfg *config.Config, answer string) provisionalInviteResponse {
+	if cfg.EarlyMedia {
+		return provisionalInviteResponse{statusCode: 183, reason: "Session Progress", body: answer, contentType: "application/sdp"}
+	}
+	return provisionalInviteResponse{statusCode: 180, reason: "Ringing"}
+}
+
+func waitBeforeInboundAnswer(ctx context.Context, waitForCancel func(context.Context) (bool, error), videoConnection net.PacketConn, requiredEarlyVideoPackets int) (bool, replay.RTPReception, error) {
+	if requiredEarlyVideoPackets == 0 {
+		wasCancelled, err := waitForCancel(ctx)
+		return wasCancelled, replay.RTPReception{}, err
+	}
+	type receptionResult struct {
+		reception replay.RTPReception
+		err       error
+	}
+	receptionResults := make(chan receptionResult, 1)
+	receptionContext, cancelReception := context.WithCancel(ctx)
+	defer cancelReception()
+	go func() {
+		reception, err := replay.WaitForRTPPackets(receptionContext, videoConnection, requiredEarlyVideoPackets)
+		receptionResults <- receptionResult{reception: reception, err: err}
+	}()
+	wasCancelled, err := waitForCancel(ctx)
+	if err != nil {
+		cancelReception()
+		return wasCancelled, replay.RTPReception{}, err
+	}
+	if wasCancelled {
+		cancelReception()
+	}
+	result := <-receptionResults
+	return wasCancelled, result.reception, result.err
 }
 
 type reinviteDialog interface {

@@ -65,6 +65,28 @@ func TestReinviteCancellationInterruptsResponseWait(t *testing.T) {
 	}
 }
 
+func TestInboundDialogAcknowledgesCancelWithoutEndingEstablishedCall(t *testing.T) {
+	server, client, dialog := newHangupDialog(t, "inbound")
+	sendRequestToClient(t, server, client.LocalAddr(), remoteHangupRequest("CANCEL"))
+	method, err := dialog.HandleIncomingRequest(context.Background())
+	if err != nil || method != "CANCEL" {
+		t.Fatalf("handle CANCEL: method=%q error=%v", method, err)
+	}
+	response := readResponseFromServer(t, server)
+	if response.StatusCode != 200 || response.GetHeader("CSeq") != "42 CANCEL" {
+		t.Fatalf("expected 200 for CANCEL, got %+v", response)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- dialog.Bye(ctx) }()
+	bye := readHangupRequest(t, server)
+	sendHangupResponse(t, server, client, bye.GetHeader("Call-ID"), bye.GetHeader("CSeq"), 200)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDialogRemoteBYEAcknowledgedAndSuppressesLocalBYE(t *testing.T) {
 	for _, direction := range []string{"outbound", "inbound"} {
 		t.Run(direction, func(t *testing.T) {

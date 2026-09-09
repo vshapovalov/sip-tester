@@ -57,17 +57,18 @@ The app runs this sequence:
 7. build local SDP from actual bound RTP ports
 8. send REGISTER
 9. wait one incoming INVITE on the same SIP socket
-10. send `180 Ringing`
-11. wait 3 seconds
-12. send `200 OK` with SDP
-13. wait matching ACK
-14. apply media destination from inbound INVITE SDP
-15. start RTP replay
-16. optionally send one in-dialog re-INVITE after `--reinvite-after`
-17. switch local RTP sockets and remote RTP destinations after the re-INVITE completes
-18. respond `200 OK` to in-dialog INFO and BYE, including while awaiting a re-INVITE response
-19. finish according to `--hangup-mode`
-20. exit
+10. send `180 Ringing`, or `183 Session Progress` with SDP when `--early-media` is enabled
+11. wait 3 seconds by default, or the duration selected with `--answer-after`
+12. optionally require video RTP before answer with `--require-early-video-packets`
+13. send `200 OK` with SDP
+14. wait matching ACK
+15. apply media destination from inbound INVITE SDP
+16. start RTP replay
+17. optionally send one in-dialog re-INVITE after `--reinvite-after`
+18. switch local RTP sockets and remote RTP destinations after the re-INVITE completes
+19. respond `200 OK` to in-dialog INFO and BYE, including while awaiting a re-INVITE response
+20. finish according to `--hangup-mode`
+21. exit
 
 ## Mode-specific CLI semantics
 
@@ -77,15 +78,21 @@ The app runs this sequence:
 - In `inbound` mode, `--callee` is optional (not required).
 - In `inbound` mode, `--caller` is treated as local AoR for REGISTER and dialog identity.
 - `--ua` controls the SIP `User-Agent` header value emitted by the tool in generated SIP requests and SIP responses (default: `sip-tester`).
+- `--answer-after` changes the inbound answer delay from its 3-second default.
+- `--early-media` makes inbound mode send `183 Session Progress` with SDP instead of `180 Ringing`.
+- `--require-early-video-packets N` requires `N` valid RTP packets on the advertised video port before inbound mode sends `200 OK`; it requires `--early-media` and `--ssrc-video`.
+- `--reject-after DURATION` makes inbound mode send `486 Busy Here` after the delay instead of answering; it cannot be combined with `--answer-after`.
+- `--require-final-video-packets N` drains queued video packets after `200 OK` and ACK, then requires `N` new RTP packets within 15 seconds; it requires inbound mode, `--ssrc-video`, and an answered call.
 - `--reinvite-after=<duration>` is available in inbound mode and sends one in-dialog re-INVITE after the given replay duration.
 - `--bundle` sends audio and video from one UDP socket. In inbound mode it applies to the new offer created by `--reinvite-after`.
 
 ### Call termination
 
-- `--hangup-mode=local`: send BYE after RTP replay finishes and wait up to 15 seconds for its response.
+- `--hangup-mode=local`: send BYE after RTP replay finishes and any required final video verification succeeds, then wait up to 15 seconds for its response.
 - `--hangup-mode=remote`: keep handling SIP after RTP replay finishes, waiting up to 15 seconds for the peer's BYE. If none arrives, exit with an error without sending a local BYE.
 - In either mode, a matching incoming BYE receives `200 OK`, stops RTP replay and cancels any planned local BYE or re-INVITE. A BYE received while a re-INVITE is pending also ends the call.
 - A scheduled re-INVITE is not started after RTP replay has finished.
+- When final video verification is enabled, incoming BYE is still answered immediately. If the required packets have not been received, the call exits with a verification error. Verification does not extend the 15-second remote hangup timeout after RTP replay.
 - If both endpoints have already sent BYE, each still answers the other's BYE while awaiting its own response.
 - For a pair of test clients, use `--mode=outbound --hangup-mode=local` and `--mode=inbound --hangup-mode=remote`. Reversing the hangup modes makes the callee initiate termination. Giving both clients `remote` causes a timeout when neither side hangs up.
 
@@ -144,6 +151,22 @@ through the same bound UDP socket.
 - If no early SDP is received, replay starts after `ACK`.
 - `Require: 100rel` on provisional responses is rejected with `100rel/PRACK not supported`.
 
+Inbound early-video verification is opt-in. For example:
+
+```bash
+sip-tester \
+  --mode inbound \
+  --caller 1002 \
+  --host pbx.example.com:5060 \
+  --local-ip 192.168.1.11 \
+  --pcap call.pcap \
+  --ssrc-video 0x259989ef \
+  --username 1002 \
+  --password secret \
+  --early-media \
+  --require-early-video-packets 10 \
+  --answer-after 5s
+```
 
 ## SIP authentication
 

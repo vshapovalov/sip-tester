@@ -289,8 +289,56 @@ func (d *InboundDialog) WaitForACK(ctx context.Context) error {
 	}
 }
 
+func (d *InboundDialog) WaitForCancel(ctx context.Context, invite *sip.Request) (bool, error) {
+	for {
+		deadline, hasDeadline := ctx.Deadline()
+		if hasDeadline {
+			_ = d.client.conn.SetReadDeadline(deadline)
+		} else {
+			_ = d.client.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		}
+		buffer := make([]byte, readBufferSize)
+		readCount, address, err := d.client.conn.ReadFromUDP(buffer)
+		if err != nil {
+			if networkError, ok := err.(net.Error); ok && networkError.Timeout() && hasDeadline {
+				return false, nil
+			}
+			return false, err
+		}
+		request, _, err := sip.ParseMessage(buffer[:readCount])
+		if err != nil || request == nil || request.Method != "CANCEL" || !d.cancelMatchesInvite(request, invite) {
+			continue
+		}
+		if err := d.client.respondOKToRequest(request, address); err != nil {
+			return false, fmt.Errorf("send 200 for CANCEL: %w", err)
+		}
+		return true, nil
+	}
+}
+
+func (d *InboundDialog) cancelMatchesInvite(cancelRequest, invite *sip.Request) bool {
+	if cancelRequest.GetHeader("Call-ID") != invite.GetHeader("Call-ID") || extractTag(cancelRequest.GetHeader("From")) != d.remoteTag {
+		return false
+	}
+	cancelCSeq := strings.Fields(cancelRequest.GetHeader("CSeq"))
+	inviteCSeq := strings.Fields(invite.GetHeader("CSeq"))
+	if len(cancelCSeq) != 2 || len(inviteCSeq) != 2 || cancelCSeq[0] != inviteCSeq[0] {
+		return false
+	}
+	toTag := extractTag(cancelRequest.GetHeader("To"))
+	return toTag == "" || toTag == d.localTag
+}
+
 func (d *InboundDialog) HandleIncomingRequest(ctx context.Context) (string, error) {
-	method, err := d.client.handleIncomingDialogRequest(ctx, d.matchesRequestDialog)
+	request, _, sender, err := d.client.readDialogMessage(ctx)
+	if err != nil {
+		return "", err
+	}
+	isDialogCancel := request != nil && request.Method == "CANCEL" && d.matchesRequestDialog(request)
+	if isDialogCancel {
+		return "CANCEL", d.client.respondOKToRequest(request, sender)
+	}
+	method, err := d.client.respondToDialogRequest(request, sender, d.matchesRequestDialog)
 	if method == "BYE" {
 		d.remoteEnded = true
 	}

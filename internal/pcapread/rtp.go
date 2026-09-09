@@ -26,7 +26,7 @@ func ExtractRTPBySSRC(packets []Packet) map[uint32][]RTPPacket {
 		if packet.DecodeErr != nil || !packet.Decoded.IsUDP {
 			continue
 		}
-		rtp, ok := parseRTPPacket(packet.Decoded.Payload, packet.Decoded.Timestamp)
+		rtp, ok := ParseRTPPacket(packet.Decoded.Payload, packet.Decoded.Timestamp)
 		if !ok {
 			continue
 		}
@@ -72,7 +72,7 @@ func StreamDuration(pkts []RTPPacket) time.Duration {
 	return pkts[len(pkts)-1].CaptureTime.Sub(pkts[0].CaptureTime)
 }
 
-func parseRTPPacket(payload []byte, captureTime time.Time) (RTPPacket, bool) {
+func ParseRTPPacket(payload []byte, captureTime time.Time) (RTPPacket, bool) {
 	if len(payload) < 12 || payload[0]>>6 != 2 {
 		return RTPPacket{}, false
 	}

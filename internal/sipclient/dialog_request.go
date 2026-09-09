@@ -69,6 +69,13 @@ func (c *Client) respondToDialogRequest(request *sip.Request, sender *net.UDPAdd
 	if request.Method != "INFO" && request.Method != "BYE" {
 		return "", ErrIgnoredDialogMessage
 	}
+	if err := c.respondOKToRequest(request, sender); err != nil {
+		return "", err
+	}
+	return request.Method, nil
+}
+
+func (c *Client) respondOKToRequest(request *sip.Request, sender *net.UDPAddr) error {
 	headerFields := make([]sip.Header, 0, 8)
 	for _, via := range request.HeaderValues("Via") {
 		headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
@@ -79,10 +86,10 @@ func (c *Client) respondToDialogRequest(request *sip.Request, sender *net.UDPAdd
 	headerFields = append(headerFields, sip.Header{Name: "User-Agent", Value: c.userAgent})
 	response := &sip.Response{StatusCode: 200, Reason: "OK", HeaderFields: headerFields}
 	if _, err := c.conn.WriteToUDP(sip.BuildResponse(response), sender); err != nil {
-		return "", fmt.Errorf("respond to %s: %w", request.Method, err)
+		return fmt.Errorf("respond to %s: %w", request.Method, err)
 	}
 	log.Printf("sipclient: handled %s call-id=%s", request.Method, request.GetHeader("Call-ID"))
-	return request.Method, nil
+	return nil
 }
 
 func (c *Client) sendDialogBYE(ctx context.Context, bye *sip.Request, matches func(*sip.Request) bool) error {
