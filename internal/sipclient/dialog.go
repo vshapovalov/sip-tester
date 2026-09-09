@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/emiago/sipgo/sip"
 )
@@ -19,6 +18,7 @@ type Dialog struct {
 	remoteTarget string
 	routeSet     []string
 	sdpAnswer    SDPAnswer
+	remoteEnded  bool
 }
 
 func (d *Dialog) SDPAnswer() SDPAnswer {
@@ -26,21 +26,13 @@ func (d *Dialog) SDPAnswer() SDPAnswer {
 }
 
 func (d *Dialog) Bye(ctx context.Context) error {
+	if d.remoteEnded {
+		return nil
+	}
 	d.client.cseq++
 	bye := d.buildInDialogRequest("BYE", "")
 	log.Printf("sipclient: BYE destination request-uri=%s routes=%v", bye.URI, d.routeSet)
-	if err := d.client.write(bye); err != nil {
-		return fmt.Errorf("send BYE: %w", err)
-	}
-
-	resp, err := d.client.waitForResponse(ctx)
-	if err != nil {
-		return fmt.Errorf("wait BYE response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("BYE failed with %d %s", resp.StatusCode, resp.Reason)
-	}
-	return nil
+	return d.client.sendDialogBYE(ctx, bye, d.matchesRequestDialog)
 }
 
 func (d *Dialog) Info(ctx context.Context, payload InfoPayload) error {
@@ -61,64 +53,16 @@ func (d *Dialog) Info(ctx context.Context, payload InfoPayload) error {
 	return nil
 }
 
-func (d *Dialog) HandleIncomingINFO(ctx context.Context) (*InfoPayload, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = d.client.conn.SetReadDeadline(deadline)
-	} else {
-		_ = d.client.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+func (d *Dialog) HandleIncomingRequest(ctx context.Context) (string, error) {
+	method, err := d.client.handleIncomingDialogRequest(ctx, d.matchesRequestDialog)
+	if method == "BYE" {
+		d.remoteEnded = true
 	}
+	return method, err
+}
 
-	buf := make([]byte, readBufferSize)
-	n, addr, err := d.client.conn.ReadFromUDP(buf)
-	if err != nil {
-		return nil, err
-	}
-	req, _, err := sip.ParseMessage(buf[:n])
-	if err != nil {
-		return nil, err
-	}
-	if req == nil || req.Method != "INFO" {
-		return nil, fmt.Errorf("expected incoming INFO")
-	}
-	if !d.matchesDialog(req.GetHeader("Call-ID"), req.GetHeader("From"), req.GetHeader("To")) {
-		return nil, fmt.Errorf("incoming INFO did not match dialog")
-	}
-	log.Printf("sipclient: INFO matched to dialog call-id=%s", req.GetHeader("Call-ID"))
-
-	payload := &InfoPayload{
-		ContentType: req.GetHeader("Content-Type"),
-		Body:        req.Body,
-	}
-
-	headerFields := make([]sip.Header, 0, 8)
-	for _, via := range req.HeaderValues("Via") {
-		headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
-	}
-	headerFields = append(headerFields,
-		sip.Header{Name: "From", Value: req.GetHeader("From")},
-		sip.Header{Name: "To", Value: req.GetHeader("To")},
-		sip.Header{Name: "Call-ID", Value: req.GetHeader("Call-ID")},
-		sip.Header{Name: "CSeq", Value: req.GetHeader("CSeq")},
-		sip.Header{Name: "User-Agent", Value: d.client.userAgent},
-	)
-	resp := &sip.Response{
-		StatusCode: 200,
-		Reason:     "OK",
-		Headers: map[string]string{
-			"From":       req.GetHeader("From"),
-			"To":         req.GetHeader("To"),
-			"Call-ID":    req.GetHeader("Call-ID"),
-			"CSeq":       req.GetHeader("CSeq"),
-			"User-Agent": d.client.userAgent,
-		},
-		HeaderFields: headerFields,
-	}
-	_, err = d.client.conn.WriteToUDP(sip.BuildResponse(resp), addr)
-	if err != nil {
-		return nil, fmt.Errorf("send 200 for INFO: %w", err)
-	}
-
-	return payload, nil
+func (d *Dialog) matchesRequestDialog(request *sip.Request) bool {
+	return d.matchesDialog(request.GetHeader("Call-ID"), request.GetHeader("From"), request.GetHeader("To"))
 }
 
 func (d *Dialog) buildInDialogRequest(method, contentType string) *sip.Request {

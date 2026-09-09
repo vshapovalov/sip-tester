@@ -191,15 +191,15 @@ func TestParseAndValidateSDPAddr_NormalizesBracketedIPv6(t *testing.T) {
 func TestStartInboundRequestLoop_StopsOnCancel(t *testing.T) {
 	handler := &fakeInboundRequestHandler{}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := startInboundRequestLoop(ctx, handler, 0, nil)
+	done := startDialogRequestLoop(ctx, handler, nil, 0, nil)
 
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("request loop error: %v", err)
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("request loop error: %v", result.err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("request loop did not stop after cancel")
@@ -218,7 +218,7 @@ func TestStartInboundRequestLoop_RunsScheduledReinviteOnce(t *testing.T) {
 	defer cancel()
 
 	reinviteCalls := make(chan struct{}, 2)
-	done := startInboundRequestLoop(ctx, handler, 10*time.Millisecond, func(context.Context) error {
+	done := startDialogRequestLoop(ctx, handler, nil, 10*time.Millisecond, func(context.Context) error {
 		reinviteCalls <- struct{}{}
 		return nil
 	})
@@ -236,20 +236,34 @@ func TestStartInboundRequestLoop_RunsScheduledReinviteOnce(t *testing.T) {
 	}
 
 	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("request loop error: %v", err)
+	if result := <-done; result.err != nil {
+		t.Fatalf("request loop error: %v", result.err)
 	}
 }
 
 func TestStartInboundRequestLoop_ReturnsReinviteError(t *testing.T) {
 	handler := &fakeInboundRequestHandler{}
 	wantErr := errors.New("re-INVITE rejected")
-	done := startInboundRequestLoop(context.Background(), handler, time.Millisecond, func(context.Context) error {
+	done := startDialogRequestLoop(context.Background(), handler, nil, time.Millisecond, func(context.Context) error {
 		return wantErr
 	})
 
-	if err := <-done; !errors.Is(err, wantErr) {
-		t.Fatalf("request loop error=%v, want %v", err, wantErr)
+	if result := <-done; !errors.Is(result.err, wantErr) {
+		t.Fatalf("request loop error=%v, want %v", result.err, wantErr)
+	}
+}
+
+func TestDialogRequestLoopPreservesReinviteFailureDuringCancellation(t *testing.T) {
+	handler := &fakeInboundRequestHandler{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantErr := errors.New("re-INVITE rejected with 488")
+	done := startDialogRequestLoop(ctx, handler, nil, time.Millisecond, func(context.Context) error {
+		cancel()
+		return wantErr
+	})
+	if result := <-done; !errors.Is(result.err, wantErr) {
+		t.Fatalf("request loop error=%v, want %v", result.err, wantErr)
 	}
 }
 

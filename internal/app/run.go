@@ -197,28 +197,7 @@ func runOutbound(s *runSetup) error {
 	s.logger.Printf("final destination applied audio=%s video=%s", udpAddrString(finalDest.AudioAddr), udpAddrString(finalDest.VideoAddr))
 
 	dialog := s.client.NewDialog(cfg.Caller, cfg.Callee, inviteRes)
-
-	s.logger.Println("handle INFO")
-	infoCtx, infoCancel := context.WithCancel(context.Background())
-	infoDone := startInfoLoop(infoCtx, s.logger, dialog)
-
-	s.replayController.Wait()
-	infoCancel()
-	<-infoDone
-
-	if err := s.replayController.Err(); err != nil {
-		return fmt.Errorf("RTP replay: %w", err)
-	}
-
-	byeCtx, byeCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
-	defer byeCancel()
-	s.logger.Println("send BYE")
-	if err := dialog.Bye(byeCtx); err != nil {
-		return fmt.Errorf("send BYE: %w", err)
-	}
-
-	s.logger.Println("exit")
-	return nil
+	return s.runEstablishedCall(dialog, 0, nil)
 }
 
 func runInbound(s *runSetup) error {
@@ -285,29 +264,9 @@ func runInbound(s *runSetup) error {
 
 	s.logger.Println("start RTP replay")
 	s.replayController.Start()
-	infoCtx, infoCancel := context.WithCancel(context.Background())
-	infoDone := startInboundRequestLoop(infoCtx, dialog, cfg.ReinviteAfter, func(ctx context.Context) error {
+	return s.runEstablishedCall(dialog, cfg.ReinviteAfter, func(ctx context.Context) error {
 		return s.applyReinvite(ctx, dialog)
 	})
-
-	s.replayController.Wait()
-	infoCancel()
-	if err := <-infoDone; err != nil {
-		return err
-	}
-	if err := s.replayController.Err(); err != nil {
-		return fmt.Errorf("RTP replay: %w", err)
-	}
-	s.logger.Println("replay finished")
-
-	byeCtx, byeCancel := context.WithTimeout(context.Background(), defaultStepTimeout)
-	defer byeCancel()
-	s.logger.Println("send BYE")
-	if err := dialog.Bye(byeCtx); err != nil {
-		return fmt.Errorf("send BYE: %w", err)
-	}
-	s.logger.Println("exit")
-	return nil
 }
 
 type reinviteDialog interface {
@@ -395,10 +354,12 @@ type replayRunner struct {
 	err       error
 	errSet    bool
 	ptMap     replay.PayloadTypeMap
+	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
 func newReplayController(logger *log.Logger, schedule []replay.ScheduledPacket, transport *replay.MediaTransportStore) *replayRunner {
-	return &replayRunner{logger: logger, schedule: schedule, transport: transport}
+	return &replayRunner{logger: logger, schedule: schedule, transport: transport, done: make(chan struct{})}
 }
 
 func (r *replayRunner) Start() bool {
@@ -408,8 +369,10 @@ func (r *replayRunner) Start() bool {
 		return false
 	}
 	r.started = true
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
 	r.wg.Add(1)
-	go r.run()
+	go r.run(ctx)
 	return true
 }
 
@@ -421,18 +384,31 @@ func (r *replayRunner) Started() bool {
 
 func (r *replayRunner) Wait() { r.wg.Wait() }
 
+func (r *replayRunner) Stop() {
+	r.mu.Lock()
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		r.Wait()
+	}
+}
+
 func (r *replayRunner) Err() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.err
 }
 
-func (r *replayRunner) run() {
+func (r *replayRunner) run(ctx context.Context) {
 	defer r.wg.Done()
+	defer close(r.done)
 	r.logger.Println("replay started")
 	sender := replay.NewUDPSenderWithTransport(r.transport, r.ptMap)
-	if err := sender.Replay(context.Background(), r.schedule); err != nil {
-		r.setErr(err)
+	if err := sender.Replay(ctx, r.schedule); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			r.setErr(err)
+		}
 		return
 	}
 	r.logger.Println("replay finished")
@@ -585,47 +561,17 @@ func udpAddrString(addr *net.UDPAddr) string {
 	return addr.String()
 }
 
-func handleInfoLoop(ctx context.Context, logger *log.Logger, dialog *sipclient.Dialog) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		waitCtx, cancel := context.WithTimeout(ctx, time.Second)
-		payload, err := dialog.HandleIncomingINFO(waitCtx)
-		cancel()
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				continue
-			}
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				continue
-			}
-			continue
-		}
-
-		logger.Printf("handled INFO content-type=%q bytes=%d", payload.ContentType, len(payload.Body))
-	}
-}
-
-func startInfoLoop(ctx context.Context, logger *log.Logger, dialog *sipclient.Dialog) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleInfoLoop(ctx, logger, dialog)
-	}()
-	return done
-}
-
-type inboundRequestHandler interface {
+type dialogRequestHandler interface {
 	HandleIncomingRequest(ctx context.Context) (string, error)
 }
 
-func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler, reinviteAfter time.Duration, reinvite func(context.Context) error) <-chan error {
-	done := make(chan error, 1)
+type dialogRequestResult struct {
+	method string
+	err    error
+}
+
+func startDialogRequestLoop(ctx context.Context, dialog dialogRequestHandler, replayDone <-chan struct{}, reinviteAfter time.Duration, reinvite func(context.Context) error) <-chan dialogRequestResult {
+	done := make(chan dialogRequestResult, 1)
 	go func() {
 		defer close(done)
 		reinviteAt := time.Time{}
@@ -635,8 +581,14 @@ func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler, 
 		for {
 			select {
 			case <-ctx.Done():
-				done <- nil
+				done <- dialogRequestResult{}
 				return
+			default:
+			}
+			select {
+			case <-replayDone:
+				reinviteAt = time.Time{}
+				replayDone = nil
 			default:
 			}
 
@@ -644,8 +596,16 @@ func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler, 
 				reinviteCtx, cancel := context.WithTimeout(ctx, defaultStepTimeout)
 				err := reinvite(reinviteCtx)
 				cancel()
+				if errors.Is(err, sipclient.ErrRemoteHangup) {
+					done <- dialogRequestResult{method: "BYE"}
+					return
+				}
+				if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+					done <- dialogRequestResult{}
+					return
+				}
 				if err != nil {
-					done <- fmt.Errorf("re-INVITE: %w", err)
+					done <- dialogRequestResult{err: fmt.Errorf("re-INVITE: %w", err)}
 					return
 				}
 				reinviteAt = time.Time{}
@@ -663,17 +623,18 @@ func startInboundRequestLoop(ctx context.Context, dialog inboundRequestHandler, 
 			method, err := dialog.HandleIncomingRequest(waitCtx)
 			cancel()
 			if err != nil {
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, sipclient.ErrIgnoredDialogMessage) {
 					continue
 				}
 				var netErr net.Error
 				if errors.As(err, &netErr) && netErr.Timeout() {
 					continue
 				}
-				continue
+				done <- dialogRequestResult{err: fmt.Errorf("handle dialog request: %w", err)}
+				return
 			}
 			if method == "BYE" {
-				done <- nil
+				done <- dialogRequestResult{method: method}
 				return
 			}
 		}

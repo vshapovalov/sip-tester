@@ -236,3 +236,30 @@ func TestParseArgs_ReinviteRequiresInboundMode(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestParseArgsHangupMode(t *testing.T) {
+	for _, callMode := range []string{"outbound", "inbound"} {
+		for _, hangupMode := range []string{"local", "remote", "invalid"} {
+			t.Run(callMode+"/"+hangupMode, func(t *testing.T) {
+				cfg, err := ParseArgs([]string{
+					"--mode", callMode, "--hangup-mode", hangupMode,
+					"--caller", "1001", "--callee", "1002",
+					"--host", "127.0.0.1:5060", "--local-ip", "127.0.0.1",
+					"--pcap", "call.pcap", "--ssrc-audio", "1234",
+				})
+				if hangupMode == "invalid" {
+					if err == nil || !strings.Contains(err.Error(), "--hangup-mode must be one of") {
+						t.Fatalf("expected hangup mode validation error, got %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("parse hangup mode: %v", err)
+				}
+				if cfg.HangupMode != hangupMode {
+					t.Fatalf("hangup mode %q was not retained in config: %+v", hangupMode, cfg)
+				}
+			})
+		}
+	}
+}

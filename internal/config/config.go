@@ -9,8 +9,9 @@ import (
 )
 
 type Config struct {
-	Mode string
-	UA   string
+	Mode       string
+	UA         string
+	HangupMode string
 
 	CallerRaw string
 	CalleeRaw string
@@ -44,6 +45,12 @@ func (c *Config) ValidateRequired() error {
 	}
 	if c.UA == "" {
 		c.UA = "sip-tester"
+	}
+	if c.HangupMode == "" {
+		c.HangupMode = "local"
+	}
+	if c.HangupMode != "local" && c.HangupMode != "remote" {
+		return fmt.Errorf("--hangup-mode must be one of: local, remote")
 	}
 	if c.Mode != "outbound" && c.Mode != "inbound" {
 		return fmt.Errorf("--mode must be one of: outbound, inbound")
