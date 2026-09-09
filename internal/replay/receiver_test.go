@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -61,6 +62,46 @@ func TestWaitForRTPPacketsReportsCountOnTimeout(t *testing.T) {
 	if reception.PacketCount != 0 {
 		t.Fatalf("packet count=%d", reception.PacketCount)
 	}
+}
+
+func TestWaitForRTPPacketsDoesNotCountPacketsAfterCancellation(t *testing.T) {
+	for _, cancellationPoint := range []string{"before_wait", "during_read"} {
+		t.Run(cancellationPoint, func(t *testing.T) {
+			receiver := listenTestUDP(t)
+			sender := listenTestUDP(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cancelAndSendPacket := func() {
+				cancel()
+				if _, err := sender.WriteToUDP(buildReceivedRTPPacket(1, 0x11223344), receiver.LocalAddr().(*net.UDPAddr)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var connection net.PacketConn = receiver
+			if cancellationPoint == "before_wait" {
+				cancelAndSendPacket()
+			} else {
+				connection = &cancelOnReadPacketConn{PacketConn: receiver, cancelAndSendPacket: cancelAndSendPacket}
+			}
+			reception, err := WaitForRTPPackets(ctx, connection, 1)
+			if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "received 0 of 1 required RTP packets") {
+				t.Fatalf("expected cancellation with missing packet count, got reception=%+v error=%v", reception, err)
+			}
+			if reception.PacketCount != 0 {
+				t.Fatalf("counted packets after cancellation: %d", reception.PacketCount)
+			}
+		})
+	}
+}
+
+type cancelOnReadPacketConn struct {
+	net.PacketConn
+	cancelAndSendPacket func()
+}
+
+func (connection *cancelOnReadPacketConn) ReadFrom(packet []byte) (int, net.Addr, error) {
+	connection.cancelAndSendPacket()
+	return connection.PacketConn.ReadFrom(packet)
 }
 
 func TestWaitForRTPPacketsReturnsImmediatelyWhenNoPacketsAreRequired(t *testing.T) {

@@ -2,6 +2,7 @@ package sipclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -21,6 +22,7 @@ type InboundDialog struct {
 	remoteTo     string
 	remoteTarget string
 	routeSet     []string
+	remoteEnded  bool
 }
 
 func BuildRegisterContact(aor string, localAddr *net.UDPAddr) (string, error) {
@@ -307,7 +309,7 @@ func (d *InboundDialog) WaitForCancel(ctx context.Context, invite *sip.Request) 
 		if err != nil || request == nil || request.Method != "CANCEL" || !d.cancelMatchesInvite(request, invite) {
 			continue
 		}
-		if err := d.respondOKToRequest(request, address); err != nil {
+		if err := d.client.respondOKToRequest(request, address); err != nil {
 			return false, fmt.Errorf("send 200 for CANCEL: %w", err)
 		}
 		return true, nil
@@ -328,67 +330,28 @@ func (d *InboundDialog) cancelMatchesInvite(cancelRequest, invite *sip.Request) 
 }
 
 func (d *InboundDialog) HandleIncomingRequest(ctx context.Context) (string, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = d.client.conn.SetReadDeadline(deadline)
-	} else {
-		_ = d.client.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	}
-	buf := make([]byte, readBufferSize)
-	n, addr, err := d.client.conn.ReadFromUDP(buf)
+	request, _, sender, err := d.client.readDialogMessage(ctx)
 	if err != nil {
 		return "", err
 	}
-	req, _, err := sip.ParseMessage(buf[:n])
-	if err != nil || req == nil {
-		return "", fmt.Errorf("invalid request")
+	isDialogCancel := request != nil && request.Method == "CANCEL" && d.matchesRequestDialog(request)
+	if isDialogCancel {
+		return "CANCEL", d.client.respondOKToRequest(request, sender)
 	}
-	if !d.matchesRequestDialog(req) {
-		return "", fmt.Errorf("request did not match dialog")
+	method, err := d.client.respondToDialogRequest(request, sender, d.matchesRequestDialog)
+	if method == "BYE" {
+		d.remoteEnded = true
 	}
-	switch req.Method {
-	case "INFO", "BYE", "CANCEL":
-		if err := d.respondOKToRequest(req, addr); err != nil {
-			return "", err
-		}
-		return req.Method, nil
-	default:
-		return "", fmt.Errorf("unsupported method %s", req.Method)
-	}
-}
-
-func (d *InboundDialog) respondOKToRequest(request *sip.Request, address *net.UDPAddr) error {
-	headerFields := make([]sip.Header, 0, 8)
-	for _, via := range request.HeaderValues("Via") {
-		headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
-	}
-	headerFields = append(headerFields,
-		sip.Header{Name: "From", Value: request.GetHeader("From")},
-		sip.Header{Name: "To", Value: request.GetHeader("To")},
-		sip.Header{Name: "Call-ID", Value: request.GetHeader("Call-ID")},
-		sip.Header{Name: "CSeq", Value: request.GetHeader("CSeq")},
-		sip.Header{Name: "User-Agent", Value: d.client.userAgent},
-	)
-	response := &sip.Response{StatusCode: 200, Reason: "OK", Headers: map[string]string{
-		"From": request.GetHeader("From"), "To": request.GetHeader("To"), "Call-ID": request.GetHeader("Call-ID"), "CSeq": request.GetHeader("CSeq"), "User-Agent": d.client.userAgent,
-	}, HeaderFields: headerFields}
-	_, err := d.client.conn.WriteToUDP(sip.BuildResponse(response), address)
-	return err
+	return method, err
 }
 
 func (d *InboundDialog) Bye(ctx context.Context) error {
+	if d.remoteEnded {
+		return nil
+	}
 	d.client.cseq++
 	bye := d.buildByeRequest()
-	if err := d.client.write(bye); err != nil {
-		return fmt.Errorf("send BYE: %w", err)
-	}
-	resp, err := d.client.waitForResponse(ctx)
-	if err != nil {
-		return fmt.Errorf("wait BYE response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("BYE failed with %d %s", resp.StatusCode, resp.Reason)
-	}
-	return nil
+	return d.client.sendDialogBYE(ctx, bye, d.matchesRequestDialog)
 }
 
 func (d *InboundDialog) Reinvite(ctx context.Context, offerSDP string) (SDPAnswer, error) {
@@ -400,7 +363,7 @@ func (d *InboundDialog) Reinvite(ctx context.Context, offerSDP string) (SDPAnswe
 	if err := d.client.write(reinvite); err != nil {
 		return SDPAnswer{}, fmt.Errorf("send re-INVITE: %w", err)
 	}
-	response, err := d.client.waitForInviteResponse(ctx, nil, reinvite, time.Time{})
+	response, err := d.waitForReinviteResponse(ctx, reinvite)
 	if err != nil {
 		return SDPAnswer{}, fmt.Errorf("wait re-INVITE response: %w", err)
 	}
@@ -423,6 +386,39 @@ func (d *InboundDialog) Reinvite(ctx context.Context, offerSDP string) (SDPAnswe
 		return SDPAnswer{}, fmt.Errorf("send re-INVITE ACK: %w", err)
 	}
 	return answer, nil
+}
+
+func (d *InboundDialog) waitForReinviteResponse(ctx context.Context, reinvite *sip.Request) (*sip.Response, error) {
+	for {
+		request, response, sender, err := d.client.readDialogMessage(ctx)
+		if errors.Is(err, ErrIgnoredDialogMessage) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if request != nil {
+			method, err := d.client.respondToDialogRequest(request, sender, d.matchesRequestDialog)
+			if err != nil && !errors.Is(err, ErrIgnoredDialogMessage) {
+				return nil, err
+			}
+			if method == "BYE" {
+				d.remoteEnded = true
+				return nil, ErrRemoteHangup
+			}
+			continue
+		}
+		if !matchesDialogResponse(response, reinvite) {
+			continue
+		}
+		if response.StatusCode < 200 {
+			if require100Rel(response.GetHeader("Require")) {
+				return nil, fmt.Errorf("100rel/PRACK not supported")
+			}
+			continue
+		}
+		return response, nil
+	}
 }
 
 func (d *InboundDialog) buildReinviteRequest(offerSDP string) (*sip.Request, error) {

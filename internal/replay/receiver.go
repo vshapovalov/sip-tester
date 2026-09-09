@@ -42,6 +42,9 @@ func WaitForRTPPackets(ctx context.Context, connection net.PacketConn, minimumPa
 
 	buffer := make([]byte, 64*1024)
 	for reception.PacketCount < minimumPacketCount {
+		if contextError := ctx.Err(); contextError != nil {
+			return reception, fmt.Errorf("received %d of %d required RTP packets: %w", reception.PacketCount, minimumPacketCount, contextError)
+		}
 		readDeadline := time.Now().Add(250 * time.Millisecond)
 		if contextDeadline, hasDeadline := ctx.Deadline(); hasDeadline && contextDeadline.Before(readDeadline) {
 			readDeadline = contextDeadline
@@ -51,11 +54,11 @@ func WaitForRTPPackets(ctx context.Context, connection net.PacketConn, minimumPa
 		}
 
 		readCount, _, err := connection.ReadFrom(buffer)
+		if contextError := ctx.Err(); contextError != nil {
+			return reception, fmt.Errorf("received %d of %d required RTP packets: %w", reception.PacketCount, minimumPacketCount, contextError)
+		}
 		if err != nil {
 			if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
-				if contextError := ctx.Err(); contextError != nil {
-					return reception, fmt.Errorf("received %d of %d required RTP packets: %w", reception.PacketCount, minimumPacketCount, contextError)
-				}
 				continue
 			}
 			return reception, fmt.Errorf("read RTP packet: %w", err)

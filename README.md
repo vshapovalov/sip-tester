@@ -3,8 +3,11 @@
 SIP call replay tester that orchestrates SIP signaling and RTP playback from a PCAP capture.
 
 Supports two modes:
+
 - `outbound` (default): initiates a call as UAC.
-- `inbound`: registers, answers one inbound INVITE as UAS, replays RTP, sends BYE, exits.
+- `inbound`: registers, answers one inbound INVITE as UAS, and replays RTP.
+
+Both call modes support `--hangup-mode=local|remote` to choose who ends the call.
 
 ## Example
 
@@ -39,8 +42,8 @@ The app runs this sequence:
 11. send ACK
 12. apply final media destination from 200 OK SDP
 13. continue RTP replay (without restart) with final destination
-14. handle INFO
-15. send BYE
+14. handle incoming INFO and BYE
+15. finish according to `--hangup-mode`
 16. exit
 
 ### Inbound mode (`--mode=inbound`)
@@ -63,13 +66,14 @@ The app runs this sequence:
 16. start RTP replay
 17. optionally send one in-dialog re-INVITE after `--reinvite-after`
 18. switch local RTP sockets and remote RTP destinations after the re-INVITE completes
-19. respond `200 OK` to in-dialog INFO while replay runs
-20. send BYE after replay and wait `200 OK`
+19. respond `200 OK` to in-dialog INFO and BYE, including while awaiting a re-INVITE response
+20. finish according to `--hangup-mode`
 21. exit
 
 ## Mode-specific CLI semantics
 
 - `--mode` allowed values: `outbound|inbound` (default: `outbound`).
+- `--hangup-mode` allowed values: `local|remote` (default: `local`), independent of call mode.
 - In `outbound` mode, `--callee` is required.
 - In `inbound` mode, `--callee` is optional (not required).
 - In `inbound` mode, `--caller` is treated as local AoR for REGISTER and dialog identity.
@@ -78,9 +82,19 @@ The app runs this sequence:
 - `--early-media` makes inbound mode send `183 Session Progress` with SDP instead of `180 Ringing`.
 - `--require-early-video-packets N` requires `N` valid RTP packets on the advertised video port before inbound mode sends `200 OK`; it requires `--early-media` and `--ssrc-video`.
 - `--reject-after DURATION` makes inbound mode send `486 Busy Here` after the delay instead of answering; it cannot be combined with `--answer-after`.
-- `--require-final-video-packets N` drains video packets queued before the answer and requires `N` new RTP packets after `200 OK` and ACK; it requires inbound mode, `--ssrc-video`, and an answered call.
+- `--require-final-video-packets N` drains queued video packets after `200 OK` and ACK, then requires `N` new RTP packets within 15 seconds; it requires inbound mode, `--ssrc-video`, and an answered call.
 - `--reinvite-after=<duration>` is available in inbound mode and sends one in-dialog re-INVITE after the given replay duration.
 - `--bundle` sends audio and video from one UDP socket. In inbound mode it applies to the new offer created by `--reinvite-after`.
+
+### Call termination
+
+- `--hangup-mode=local`: send BYE after RTP replay finishes and any required final video verification succeeds, then wait up to 15 seconds for its response.
+- `--hangup-mode=remote`: keep handling SIP after RTP replay finishes, waiting up to 15 seconds for the peer's BYE. If none arrives, exit with an error without sending a local BYE.
+- In either mode, a matching incoming BYE receives `200 OK`, stops RTP replay and cancels any planned local BYE or re-INVITE. A BYE received while a re-INVITE is pending also ends the call.
+- A scheduled re-INVITE is not started after RTP replay has finished.
+- When final video verification is enabled, incoming BYE is still answered immediately. If the required packets have not been received, the call exits with a verification error. Verification does not extend the 15-second remote hangup timeout after RTP replay.
+- If both endpoints have already sent BYE, each still answers the other's BYE while awaiting its own response.
+- For a pair of test clients, use `--mode=outbound --hangup-mode=local` and `--mode=inbound --hangup-mode=remote`. Reversing the hangup modes makes the callee initiate termination. Giving both clients `remote` causes a timeout when neither side hangs up.
 
 ### Inbound re-INVITE and bundled media example
 
