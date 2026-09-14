@@ -6,6 +6,84 @@ import (
 	"time"
 )
 
+func TestParseArgsAcceptsSignalingTransports(t *testing.T) {
+	for _, transport := range []string{"udp", "tcp", "tls"} {
+		t.Run(transport, func(t *testing.T) {
+			configuration, err := ParseArgs([]string{
+				"--caller", "1001", "--callee", "1002", "--host", "pbx.example.com:5061",
+				"--local-ip", "192.0.2.10", "--pcap", "call.pcap", "--ssrc-audio", "1234",
+				"--transport", transport,
+			})
+			if err != nil {
+				t.Fatalf("ParseArgs with %s transport: %v", transport, err)
+			}
+			if configuration.Transport != transport {
+				t.Fatalf("transport=%q, want %q", configuration.Transport, transport)
+			}
+		})
+	}
+}
+
+func TestParseArgsTLSOptions(t *testing.T) {
+	scenarios := []struct {
+		name       string
+		arguments  []string
+		caFile     string
+		isInsecure bool
+	}{
+		{name: "system roots"},
+		{name: "additional CA", arguments: []string{"--tls-ca-file", "test-ca.pem"}, caFile: "test-ca.pem"},
+		{name: "insecure opt in", arguments: []string{"--tls-insecure"}, isInsecure: true},
+		{name: "explicit verification", arguments: []string{"--tls-insecure=false"}},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			arguments := []string{
+				"--caller", "1001", "--callee", "1002", "--host", "pbx.example.com:5061",
+				"--local-ip", "192.0.2.10", "--pcap", "call.pcap", "--ssrc-audio", "1234",
+				"--transport", "tls",
+			}
+			configuration, err := ParseArgs(append(arguments, scenario.arguments...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if configuration.TLSCAFile != scenario.caFile || configuration.TLSInsecure != scenario.isInsecure {
+				t.Fatalf("CA file=%q insecure=%t, want CA file=%q insecure=%t", configuration.TLSCAFile, configuration.TLSInsecure, scenario.caFile, scenario.isInsecure)
+			}
+			if configuration.Host != "pbx.example.com" {
+				t.Fatalf("TLS host=%q, want original DNS name", configuration.Host)
+			}
+		})
+	}
+}
+
+func TestParseArgsRejectsInvalidTransportOptions(t *testing.T) {
+	scenarios := []struct {
+		name          string
+		arguments     []string
+		errorContains string
+	}{
+		{name: "unsupported transport", arguments: []string{"--transport", "ws"}, errorContains: "--transport must be one of: udp, tcp, tls"},
+		{name: "CA with default UDP", arguments: []string{"--tls-ca-file", "test-ca.pem"}, errorContains: "requires --transport tls"},
+		{name: "CA with TCP", arguments: []string{"--transport", "tcp", "--tls-ca-file", "test-ca.pem"}, errorContains: "requires --transport tls"},
+		{name: "insecure with UDP", arguments: []string{"--transport", "udp", "--tls-insecure"}, errorContains: "requires --transport tls"},
+		{name: "insecure with TCP", arguments: []string{"--transport", "tcp", "--tls-insecure"}, errorContains: "requires --transport tls"},
+		{name: "CA with insecure", arguments: []string{"--transport", "tls", "--tls-ca-file", "test-ca.pem", "--tls-insecure"}, errorContains: "--tls-ca-file and --tls-insecure cannot be used together"},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			arguments := []string{
+				"--caller", "1001", "--callee", "1002", "--host", "pbx.example.com:5061",
+				"--local-ip", "192.0.2.10", "--pcap", "call.pcap", "--ssrc-audio", "1234",
+			}
+			_, err := ParseArgs(append(arguments, scenario.arguments...))
+			if err == nil || !strings.Contains(err.Error(), scenario.errorContains) {
+				t.Fatalf("error=%v, want containing %q", err, scenario.errorContains)
+			}
+		})
+	}
+}
+
 func TestParseSSRC(t *testing.T) {
 	tests := []struct {
 		in   string

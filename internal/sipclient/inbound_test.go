@@ -225,7 +225,7 @@ func TestWaitForACK_BlocksUntilMatchingACK(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	sendRequestToClient(t, server, client.LocalAddr(), &sip.Request{
+	sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), &sip.Request{
 		Method: "ACK",
 		URI:    "sip:alice@example.com",
 		Headers: map[string]string{
@@ -282,7 +282,7 @@ func TestHandleIncomingRequest_INFOGets200OK(t *testing.T) {
 		Body: "Signal=1\r\nDuration=160",
 	}
 	payload := sip.BuildRequest(req)
-	if _, err := server.WriteToUDP(payload, client.LocalAddr()); err != nil {
+	if _, err := server.WriteToUDP(payload, client.LocalAddr().(*net.UDPAddr)); err != nil {
 		t.Fatalf("send INFO to client: %v", err)
 	}
 
@@ -326,7 +326,7 @@ func TestWaitForCancelRespondsAndMatchesInviteTransaction(t *testing.T) {
 		result <- nil
 	}()
 
-	sendRequestToClient(t, server, client.LocalAddr(), &sip.Request{
+	sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), &sip.Request{
 		Method: "CANCEL",
 		URI:    "sip:alice@example.com",
 		Headers: map[string]string{
@@ -480,7 +480,7 @@ func TestWaitForInvite_DoesNotChallengeUnauthenticatedInvite(t *testing.T) {
 		done <- nil
 	}()
 
-	sendRequestToClient(t, server, client.LocalAddr(), &sip.Request{
+	sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), &sip.Request{
 		Method: "INVITE",
 		URI:    "sip:alice@example.com",
 		Headers: map[string]string{

@@ -67,7 +67,7 @@ func (d *Dialog) matchesRequestDialog(request *sip.Request) bool {
 
 func (d *Dialog) buildInDialogRequest(method, contentType string) *sip.Request {
 	headers := map[string]string{
-		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
+		"Via":          d.client.via("z9hG4bK-" + randomToken(9)),
 		"Max-Forwards": "70",
 		"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.client.localTag),
 		"To":           d.remoteTo,

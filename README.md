@@ -23,6 +23,48 @@ sip-tester \
   --ssrc-audio 0x11223344
 ```
 
+## SIP signaling transport
+
+- `--transport udp|tcp|tls` selects the SIP signaling transport in both call modes. The default is `udp`.
+- `--host` must include the listening port for the selected transport; for example, `pbx.example.com:5060` for TCP or `pbx.example.com:5061` for TLS.
+- TLS requires TLS 1.2 or newer and verifies the server certificate against system trust and the original hostname from `--host`.
+- `--tls-ca-file /path/to/ca.pem` adds PEM CA certificates to system trust, including a private CA used by a test server. Unreadable files and files without valid PEM certificates are rejected.
+- `--tls-insecure` disables server certificate verification and emits a warning. Use it only for controlled testing.
+- TLS options require `--transport tls`. `--tls-ca-file` and `--tls-insecure` cannot be used together.
+- Connection and certificate failures return an error; the client does not automatically fall back to another signaling transport.
+
+RTP replay always uses UDP. SIP over TLS does not enable SRTP or encrypt media.
+Provide your existing capture with `--pcap`; these examples do not require adding captures to the repository.
+
+TCP example:
+
+```bash
+sip-tester \
+  --transport tcp \
+  --caller 1001 \
+  --callee 1002 \
+  --host pbx.example.com:5060 \
+  --local-ip 192.168.1.10 \
+  --pcap /path/to/existing-call.pcap \
+  --ssrc-audio 0x11223344
+```
+
+TLS example with a private CA:
+
+```bash
+sip-tester \
+  --transport tls \
+  --tls-ca-file /path/to/test-ca.pem \
+  --caller 1001 \
+  --callee 1002 \
+  --host pbx.example.com:5061 \
+  --local-ip 192.168.1.10 \
+  --pcap /path/to/existing-call.pcap \
+  --ssrc-audio 0x11223344
+```
+
+Omit `--tls-ca-file` when the server certificate is already trusted by the system.
+
 ## Orchestration flow
 
 ### Outbound mode (`--mode=outbound`, default)

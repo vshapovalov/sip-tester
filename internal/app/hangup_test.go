@@ -382,7 +382,7 @@ func (call *hangupTestCall) sendVideoPackets(t *testing.T, count int) {
 
 func (call *hangupTestCall) send(t *testing.T, packet []byte) {
 	t.Helper()
-	if _, err := call.server.WriteToUDP(packet, call.setup.client.LocalAddr()); err != nil {
+	if _, err := call.server.WriteToUDP(packet, call.setup.client.LocalAddr().(*net.UDPAddr)); err != nil {
 		t.Fatal(err)
 	}
 }
