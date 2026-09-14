@@ -17,7 +17,7 @@ var ErrIgnoredDialogMessage = errors.New("unrelated or unsupported dialog messag
 // ErrRemoteHangup ends an outstanding re-INVITE when the peer terminates the dialog.
 var ErrRemoteHangup = errors.New("dialog terminated by remote BYE")
 
-func (c *Client) readDialogMessage(ctx context.Context) (*sip.Request, *sip.Response, *net.UDPAddr, error) {
+func (c *Client) readDialogMessage(ctx context.Context) (*sip.Request, *sip.Response, net.Addr, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, nil, err
 	}
@@ -40,7 +40,7 @@ func (c *Client) readDialogMessage(ctx context.Context) (*sip.Request, *sip.Resp
 		}
 	}()
 	packet := make([]byte, readBufferSize)
-	length, sender, err := c.conn.ReadFromUDP(packet)
+	length, sender, err := c.conn.ReadFrom(packet)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, nil, ctx.Err()
@@ -62,7 +62,7 @@ func (c *Client) handleIncomingDialogRequest(ctx context.Context, matches func(*
 	return c.respondToDialogRequest(request, sender, matches)
 }
 
-func (c *Client) respondToDialogRequest(request *sip.Request, sender *net.UDPAddr, matches func(*sip.Request) bool) (string, error) {
+func (c *Client) respondToDialogRequest(request *sip.Request, sender net.Addr, matches func(*sip.Request) bool) (string, error) {
 	if request == nil || !matches(request) {
 		return "", ErrIgnoredDialogMessage
 	}
@@ -75,7 +75,7 @@ func (c *Client) respondToDialogRequest(request *sip.Request, sender *net.UDPAdd
 	return request.Method, nil
 }
 
-func (c *Client) respondOKToRequest(request *sip.Request, sender *net.UDPAddr) error {
+func (c *Client) respondOKToRequest(request *sip.Request, sender net.Addr) error {
 	headerFields := make([]sip.Header, 0, 8)
 	for _, via := range request.HeaderValues("Via") {
 		headerFields = append(headerFields, sip.Header{Name: "Via", Value: via})
@@ -85,7 +85,7 @@ func (c *Client) respondOKToRequest(request *sip.Request, sender *net.UDPAddr) e
 	}
 	headerFields = append(headerFields, sip.Header{Name: "User-Agent", Value: c.userAgent})
 	response := &sip.Response{StatusCode: 200, Reason: "OK", HeaderFields: headerFields}
-	if _, err := c.conn.WriteToUDP(sip.BuildResponse(response), sender); err != nil {
+	if _, err := c.conn.WriteTo(sip.BuildResponse(response), sender); err != nil {
 		return fmt.Errorf("respond to %s: %w", request.Method, err)
 	}
 	log.Printf("sipclient: handled %s call-id=%s", request.Method, request.GetHeader("Call-ID"))

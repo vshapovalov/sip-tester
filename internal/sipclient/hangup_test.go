@@ -30,7 +30,7 @@ func TestReinviteHandlesRemoteBYEWhileWaitingForResponse(t *testing.T) {
 	if reinvite.Method != "INVITE" {
 		t.Fatalf("expected re-INVITE, got %s", reinvite.Method)
 	}
-	sendRequestToClient(t, server, client.LocalAddr(), remoteHangupRequest("BYE"))
+	sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), remoteHangupRequest("BYE"))
 	response := readResponseFromServer(t, server)
 	if response.StatusCode != 200 || response.GetHeader("CSeq") != "42 BYE" {
 		t.Fatalf("BYE response during re-INVITE: %+v", response)
@@ -67,7 +67,7 @@ func TestReinviteCancellationInterruptsResponseWait(t *testing.T) {
 
 func TestInboundDialogAcknowledgesCancelWithoutEndingEstablishedCall(t *testing.T) {
 	server, client, dialog := newHangupDialog(t, "inbound")
-	sendRequestToClient(t, server, client.LocalAddr(), remoteHangupRequest("CANCEL"))
+	sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), remoteHangupRequest("CANCEL"))
 	method, err := dialog.HandleIncomingRequest(context.Background())
 	if err != nil || method != "CANCEL" {
 		t.Fatalf("handle CANCEL: method=%q error=%v", method, err)
@@ -92,7 +92,7 @@ func TestDialogRemoteBYEAcknowledgedAndSuppressesLocalBYE(t *testing.T) {
 		t.Run(direction, func(t *testing.T) {
 			server, client, dialog := newHangupDialog(t, direction)
 			request := remoteHangupRequest("BYE")
-			sendRequestToClient(t, server, client.LocalAddr(), request)
+			sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), request)
 			method, err := dialog.HandleIncomingRequest(context.Background())
 			if err != nil || method != "BYE" {
 				t.Fatalf("handle BYE: method=%q error=%v", method, err)
@@ -121,7 +121,7 @@ func TestDialogBYEHandlesCrossedBYEAndWaitsForMatchingResponse(t *testing.T) {
 			if bye.Method != "BYE" {
 				t.Fatalf("expected BYE, got %s", bye.Method)
 			}
-			sendRequestToClient(t, server, client.LocalAddr(), remoteHangupRequest("BYE"))
+			sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), remoteHangupRequest("BYE"))
 			response := readResponseFromServer(t, server)
 			if response.StatusCode != 200 || response.GetHeader("CSeq") != "42 BYE" {
 				t.Fatalf("crossed BYE response: %+v", response)
@@ -136,13 +136,13 @@ func TestDialogBYEHandlesCrossedBYEAndWaitsForMatchingResponse(t *testing.T) {
 			} {
 				sendHangupResponse(t, server, client, unrelated.callID, unrelated.cseq, unrelated.status)
 			}
-			if _, err := server.WriteToUDP([]byte("invalid SIP packet"), client.LocalAddr()); err != nil {
+			if _, err := server.WriteToUDP([]byte("invalid SIP packet"), client.LocalAddr().(*net.UDPAddr)); err != nil {
 				t.Fatal(err)
 			}
 			foreignBYE := remoteHangupRequest("BYE")
 			foreignBYE.Headers["Call-ID"] = "other-call"
-			sendRequestToClient(t, server, client.LocalAddr(), foreignBYE)
-			sendRequestToClient(t, server, client.LocalAddr(), remoteHangupRequest("INFO"))
+			sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), foreignBYE)
+			sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), remoteHangupRequest("INFO"))
 			infoResponse := readResponseFromServer(t, server)
 			if infoResponse.GetHeader("CSeq") != "42 INFO" {
 				t.Fatalf("expected INFO response while awaiting own BYE response, got %+v", infoResponse)
@@ -167,12 +167,12 @@ func TestDialogIgnoresUnrelatedBYEWithoutEndingCall(t *testing.T) {
 			for _, changedHeader := range []string{"Call-ID", "From", "To"} {
 				request := remoteHangupRequest("BYE")
 				request.Headers[changedHeader] = "wrong-dialog"
-				sendRequestToClient(t, server, client.LocalAddr(), request)
+				sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), request)
 				if _, err := dialog.HandleIncomingRequest(context.Background()); !errors.Is(err, ErrIgnoredDialogMessage) {
 					t.Fatalf("mismatched %s: %v", changedHeader, err)
 				}
 			}
-			sendRequestToClient(t, server, client.LocalAddr(), remoteHangupRequest("OPTIONS"))
+			sendRequestToClient(t, server, client.LocalAddr().(*net.UDPAddr), remoteHangupRequest("OPTIONS"))
 			if _, err := dialog.HandleIncomingRequest(context.Background()); !errors.Is(err, ErrIgnoredDialogMessage) {
 				t.Fatalf("unsupported request: %v", err)
 			}
@@ -283,7 +283,7 @@ func sendHangupResponse(t *testing.T, server *net.UDPConn, client *Client, callI
 		"Via": "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-test", "Call-ID": callID, "CSeq": cseq,
 		"From": "<sip:1001@example.com>;tag=local", "To": "<sip:1002@example.com>;tag=remote",
 	}}
-	if _, err := server.WriteToUDP(sip.BuildResponse(response), client.LocalAddr()); err != nil {
+	if _, err := server.WriteToUDP(sip.BuildResponse(response), client.LocalAddr().(*net.UDPAddr)); err != nil {
 		t.Fatal(err)
 	}
 }

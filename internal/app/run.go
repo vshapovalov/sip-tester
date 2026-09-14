@@ -105,7 +105,15 @@ func Run(args []string) error {
 		return fmt.Errorf("build SDP offer: %w", err)
 	}
 
-	client, err := sipclient.NewClient(cfg.LocalIPParsed, cfg.IPFamily, resolvedTarget, cfg.Username, cfg.Password, cfg.UA)
+	tlsConfig, err := loadTLSConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("configure SIP TLS: %w", err)
+	}
+	if cfg.TLSInsecure {
+		logger.Println("WARNING: SIP TLS certificate verification disabled by --tls-insecure")
+	}
+	logger.Printf("SIP transport=%s", cfg.Transport)
+	client, err := sipclient.NewClientWithTransport(cfg.LocalIPParsed, cfg.IPFamily, resolvedTarget, cfg.Username, cfg.Password, cfg.UA, sipclient.TransportOptions{Protocol: cfg.Transport, TLSConfig: tlsConfig})
 	if err != nil {
 		return fmt.Errorf("create SIP client: %w", err)
 	}
@@ -206,7 +214,7 @@ func runOutbound(s *runSetup) error {
 func runInbound(s *runSetup) error {
 	cfg := s.cfg
 
-	contact, err := sipclient.BuildRegisterContact(cfg.Caller, s.client.LocalAddr())
+	contact, err := s.client.Contact(cfg.Caller)
 	if err != nil {
 		return fmt.Errorf("build REGISTER Contact: %w", err)
 	}

@@ -444,7 +444,8 @@ Explicit SSRC selection prevents accidental replay of wrong media and removes am
 
 ### Bind and SDP usage
 
-- SIP UDP socket binds to `--local-ip` using family-specific network (`udp4` or `udp6`).
+- SIP binds to `--local-ip`: UDP uses `udp4`/`udp6`; TCP and TLS use a persistent outbound `tcp4`/`tcp6` connection to `--host`.
+- `--transport` selects `udp` (default), `tcp`, or `tls`. TLS verifies the server certificate and hostname; `--tls-ca-file` adds trusted PEM certificates, while explicit `--tls-insecure` disables verification for tests. These TLS flags are mutually exclusive and require `--transport tls`.
 - RTP binds two persistent sockets on `--local-ip` using the same family-specific network (`udp4` or `udp6`), one for audio and one for video.
 - Both RTP ports are chosen in `10000-20000` and are advertised directly in SDP `m=audio` / `m=video`.
 - RTP send path uses the same bound sockets (audio packets on audio socket, video packets on video socket) for the full call lifetime.
@@ -465,7 +466,6 @@ Current scope intentionally excludes many SIP/media features:
 - no UPDATE,
 - no transcoding,
 - no loop playback mode,
-- no SIP over TCP/TLS (UDP only),
 - no full SIP authentication framework (only single-challenge digest flows for INVITE/REGISTER),
 - no long-running inbound call server mode.
 
@@ -651,7 +651,7 @@ Potential extensions aligned with current architecture:
   - enforce `--local-ip` family match during DNS resolution.
 
 - **Transport/security expansion**
-  - SIP over TCP/TLS and optional SRTP where test scenarios demand it.
+  - Optional SRTP where test scenarios demand it; SIP over TCP/TLS is supported.
 
 ---
 

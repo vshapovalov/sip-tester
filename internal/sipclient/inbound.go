@@ -25,20 +25,24 @@ type InboundDialog struct {
 	remoteEnded  bool
 }
 
-func BuildRegisterContact(aor string, localAddr *net.UDPAddr) (string, error) {
-	if localAddr == nil || localAddr.IP == nil {
+func BuildRegisterContact(aor string, localAddr net.Addr) (string, error) {
+	if localAddr == nil {
 		return "", fmt.Errorf("local SIP socket address is required")
 	}
-	user := strings.TrimPrefix(strings.TrimSpace(aor), "sip:")
-	if at := strings.Index(user, "@"); at >= 0 {
-		user = user[:at]
+	host, port, err := net.SplitHostPort(localAddr.String())
+	if err != nil || net.ParseIP(host) == nil {
+		return "", fmt.Errorf("local SIP socket must have an IP address and port")
 	}
+	user := sipURIUser(aor)
 	if user == "" {
 		return "", fmt.Errorf("invalid AoR for Contact")
 	}
-	host := localAddr.IP.String()
-	host = formatSIPURIHost(host)
-	return fmt.Sprintf("sip:%s@%s:%d", user, host, localAddr.Port), nil
+	return fmt.Sprintf("sip:%s@%s", user, net.JoinHostPort(host, port)), nil
+}
+
+func sipURIUser(uri string) string {
+	user, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(uri), "sip:"), "@")
+	return user
 }
 
 func formatSIPURIHost(host string) string {
@@ -83,7 +87,7 @@ func (c *Client) Register(ctx context.Context, aor string, contact string, expir
 	cseq := 1
 	buildReq := func(extra map[string]string) *sip.Request {
 		headers := map[string]string{
-			"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", c.localAddr.String(), randomToken(9)),
+			"Via":          c.via("z9hG4bK-" + randomToken(9)),
 			"Max-Forwards": "70",
 			"From":         fmt.Sprintf("<%s>;tag=%s", aor, fromTag),
 			"To":           fmt.Sprintf("<%s>", aor),
@@ -154,7 +158,7 @@ func (c *Client) Register(ctx context.Context, aor string, contact string, expir
 	return nil
 }
 
-func (c *Client) WaitForInvite(ctx context.Context) (*sip.Request, *net.UDPAddr, error) {
+func (c *Client) WaitForInvite(ctx context.Context) (*sip.Request, net.Addr, error) {
 	for {
 		if deadline, ok := ctx.Deadline(); ok {
 			_ = c.conn.SetReadDeadline(deadline)
@@ -162,7 +166,7 @@ func (c *Client) WaitForInvite(ctx context.Context) (*sip.Request, *net.UDPAddr,
 			_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		}
 		buf := make([]byte, readBufferSize)
-		n, addr, err := c.conn.ReadFromUDP(buf)
+		n, addr, err := c.conn.ReadFrom(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				select {
@@ -220,7 +224,7 @@ func (d *InboundDialog) inviteToWithLocalTag(invite *sip.Request) string {
 	return base + ";tag=" + d.localTag
 }
 
-func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAddr, code int, reason string, body string, contentType string) error {
+func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr net.Addr, code int, reason string, body string, contentType string) error {
 	headers := map[string]string{
 		"From":       invite.GetHeader("From"),
 		"To":         d.inviteToWithLocalTag(invite),
@@ -243,7 +247,7 @@ func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAdd
 		headerFields = append(headerFields, sip.Header{Name: "Record-Route", Value: rr})
 	}
 	if invite.Method == "INVITE" && code == 200 {
-		contact, err := BuildRegisterContact(d.fromURI, d.client.localAddr)
+		contact, err := d.client.Contact(d.fromURI)
 		if err != nil {
 			return fmt.Errorf("build Contact for INVITE response: %w", err)
 		}
@@ -255,7 +259,7 @@ func (d *InboundDialog) SendInviteResponse(invite *sip.Request, addr *net.UDPAdd
 		headerFields = append(headerFields, sip.Header{Name: "Content-Type", Value: contentType})
 	}
 	resp := &sip.Response{StatusCode: code, Reason: reason, Headers: headers, HeaderFields: headerFields, Body: body}
-	_, err := d.client.conn.WriteToUDP(sip.BuildResponse(resp), addr)
+	_, err := d.client.conn.WriteTo(sip.BuildResponse(resp), addr)
 	return err
 }
 
@@ -267,7 +271,7 @@ func (d *InboundDialog) WaitForACK(ctx context.Context) error {
 			_ = d.client.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		}
 		buf := make([]byte, readBufferSize)
-		n, _, err := d.client.conn.ReadFromUDP(buf)
+		n, _, err := d.client.conn.ReadFrom(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				select {
@@ -298,7 +302,7 @@ func (d *InboundDialog) WaitForCancel(ctx context.Context, invite *sip.Request) 
 			_ = d.client.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		}
 		buffer := make([]byte, readBufferSize)
-		readCount, address, err := d.client.conn.ReadFromUDP(buffer)
+		readCount, address, err := d.client.conn.ReadFrom(buffer)
 		if err != nil {
 			if networkError, ok := err.(net.Error); ok && networkError.Timeout() && hasDeadline {
 				return false, nil
@@ -422,12 +426,12 @@ func (d *InboundDialog) waitForReinviteResponse(ctx context.Context, reinvite *s
 }
 
 func (d *InboundDialog) buildReinviteRequest(offerSDP string) (*sip.Request, error) {
-	contact, err := BuildRegisterContact(d.fromURI, d.client.localAddr)
+	contact, err := d.client.Contact(d.fromURI)
 	if err != nil {
 		return nil, fmt.Errorf("build re-INVITE Contact: %w", err)
 	}
 	headers := map[string]string{
-		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
+		"Via":          d.client.via("z9hG4bK-" + randomToken(9)),
 		"Max-Forwards": "70",
 		"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.localTag),
 		"To":           d.remoteTo,
@@ -465,7 +469,7 @@ func (d *InboundDialog) buildReinviteRequest(offerSDP string) (*sip.Request, err
 
 func (d *InboundDialog) buildReinviteACK(response *sip.Response) *sip.Request {
 	headers := map[string]string{
-		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
+		"Via":          d.client.via("z9hG4bK-" + randomToken(9)),
 		"Max-Forwards": "70",
 		"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.localTag),
 		"To":           response.GetHeader("To"),
@@ -493,7 +497,7 @@ func (d *InboundDialog) buildReinviteACK(response *sip.Response) *sip.Request {
 
 func (d *InboundDialog) buildByeRequest() *sip.Request {
 	headers := map[string]string{
-		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", d.client.localAddr.String(), randomToken(9)),
+		"Via":          d.client.via("z9hG4bK-" + randomToken(9)),
 		"Max-Forwards": "70",
 		"From":         fmt.Sprintf("<%s>;tag=%s", d.fromURI, d.localTag),
 		"To":           d.remoteTo,

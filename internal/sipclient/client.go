@@ -17,9 +17,10 @@ import (
 const readBufferSize = 64 * 1024
 
 type Client struct {
-	conn       *net.UDPConn
-	remoteAddr *net.UDPAddr
-	localAddr  *net.UDPAddr
+	conn       net.PacketConn
+	remoteAddr net.Addr
+	localAddr  net.Addr
+	transport  string
 	registrar  string
 	callID     string
 	localTag   string
@@ -47,30 +48,26 @@ type InviteOptions struct {
 }
 
 func NewClient(localIP net.IP, family netutil.IPFamily, target netutil.ResolvedTarget, username, password, userAgent string) (*Client, error) {
+	return NewClientWithTransport(localIP, family, target, username, password, userAgent, TransportOptions{Protocol: "udp"})
+}
+
+func NewClientWithTransport(localIP net.IP, family netutil.IPFamily, target netutil.ResolvedTarget, username, password, userAgent string, options TransportOptions) (*Client, error) {
 	if localIP == nil {
 		return nil, fmt.Errorf("local IP is required")
 	}
-	network, err := netutil.UDPNetworkForFamily(family)
+	if options.Protocol == "" {
+		options.Protocol = "udp"
+	}
+	conn, remoteAddr, err := openSignalingSocket(localIP, family, target, options)
 	if err != nil {
 		return nil, err
 	}
-	remoteAddr, err := net.ResolveUDPAddr(network, target.RemoteAddr)
-	if err != nil {
-		return nil, fmt.Errorf("resolve remote address: %w", err)
-	}
-
-	localAddr := &net.UDPAddr{IP: localIP, Port: 0}
-	conn, err := net.ListenUDP(network, localAddr)
-	if err != nil {
-		return nil, fmt.Errorf("bind local UDP socket %s: %w", localIP.String(), err)
-	}
-
-	bound := conn.LocalAddr().(*net.UDPAddr)
 
 	return &Client{
 		conn:       conn,
 		remoteAddr: remoteAddr,
-		localAddr:  bound,
+		localAddr:  conn.LocalAddr(),
+		transport:  options.Protocol,
 		registrar:  net.JoinHostPort(target.Hostname, fmt.Sprintf("%d", target.Port)),
 		callID:     randomToken(12),
 		localTag:   randomToken(8),
@@ -88,7 +85,7 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-func (c *Client) LocalAddr() *net.UDPAddr {
+func (c *Client) LocalAddr() net.Addr {
 	return c.localAddr
 }
 
@@ -259,13 +256,13 @@ func inviteResultFromResponse(resp *sip.Response) (InviteResult, error) {
 func (c *Client) buildInvite(fromURI, toURI, offerSDP string, extraHeaders map[string]string) *sip.Request {
 	branch := "z9hG4bK-" + randomToken(9)
 	headers := map[string]string{
-		"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=%s;rport", c.localAddr.String(), branch),
+		"Via":          c.via(branch),
 		"Max-Forwards": "70",
 		"From":         fmt.Sprintf("<%s>;tag=%s", fromURI, c.localTag),
 		"To":           fmt.Sprintf("<%s>", toURI),
 		"Call-ID":      c.callID,
 		"CSeq":         fmt.Sprintf("%d INVITE", c.cseq),
-		"Contact":      fmt.Sprintf("<%s>", fromURI),
+		"Contact":      fmt.Sprintf("<%s>", c.inviteContact(fromURI)),
 		"Content-Type": "application/sdp",
 		"User-Agent":   c.userAgent,
 	}
@@ -300,13 +297,13 @@ func (c *Client) buildACK(fromURI string, inviteRes InviteResult) *sip.Request {
 		Method: "ACK",
 		URI:    inviteRes.RemoteTarget,
 		Headers: map[string]string{
-			"Via":          fmt.Sprintf("SIP/2.0/UDP %s;branch=z9hG4bK-%s;rport", c.localAddr.String(), randomToken(9)),
+			"Via":          c.via("z9hG4bK-" + randomToken(9)),
 			"Max-Forwards": "70",
 			"From":         fmt.Sprintf("<%s>;tag=%s", fromURI, c.localTag),
 			"To":           inviteRes.ToHeader,
 			"Call-ID":      c.callID,
 			"CSeq":         fmt.Sprintf("%d ACK", c.cseq),
-			"Contact":      fmt.Sprintf("<%s>", fromURI),
+			"Contact":      fmt.Sprintf("<%s>", c.inviteContact(fromURI)),
 			"User-Agent":   c.userAgent,
 		},
 	}
@@ -318,7 +315,7 @@ func (c *Client) buildACK(fromURI string, inviteRes InviteResult) *sip.Request {
 
 func (c *Client) write(req *sip.Request) error {
 	payload := sip.BuildRequest(req)
-	_, err := c.conn.WriteToUDP(payload, c.remoteAddr)
+	_, err := c.conn.WriteTo(payload, c.remoteAddr)
 	return err
 }
 
@@ -330,7 +327,7 @@ func (c *Client) waitForResponse(ctx context.Context) (*sip.Response, error) {
 			_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		}
 		buf := make([]byte, readBufferSize)
-		n, _, err := c.conn.ReadFromUDP(buf)
+		n, _, err := c.conn.ReadFrom(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				select {
@@ -365,7 +362,7 @@ func (c *Client) waitForInviteResponse(ctx context.Context, earlyHandler EarlyMe
 		}
 		_ = c.conn.SetReadDeadline(readDeadline)
 		buf := make([]byte, readBufferSize)
-		n, _, err := c.conn.ReadFromUDP(buf)
+		n, _, err := c.conn.ReadFrom(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				if !cancelSent && !cancelAt.IsZero() && !time.Now().Before(cancelAt) {

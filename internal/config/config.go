@@ -9,9 +9,12 @@ import (
 )
 
 type Config struct {
-	Mode       string
-	UA         string
-	HangupMode string
+	Mode        string
+	UA          string
+	HangupMode  string
+	Transport   string
+	TLSCAFile   string
+	TLSInsecure bool
 
 	CallerRaw string
 	CalleeRaw string
@@ -48,6 +51,20 @@ type Config struct {
 }
 
 func (c *Config) ValidateRequired() error {
+	if c.Transport == "" {
+		c.Transport = "udp"
+	}
+	isSupportedTransport := c.Transport == "udp" || c.Transport == "tcp" || c.Transport == "tls"
+	if !isSupportedTransport {
+		return fmt.Errorf("--transport must be one of: udp, tcp, tls")
+	}
+	hasTLSOptions := c.TLSCAFile != "" || c.TLSInsecure
+	if hasTLSOptions && c.Transport != "tls" {
+		return fmt.Errorf("--tls-ca-file or --tls-insecure requires --transport tls")
+	}
+	if c.TLSCAFile != "" && c.TLSInsecure {
+		return fmt.Errorf("--tls-ca-file and --tls-insecure cannot be used together")
+	}
 	if c.Mode == "" {
 		c.Mode = "outbound"
 	}
