@@ -48,6 +48,9 @@ func Run(args []string) error {
 		return fmt.Errorf("resolve SIP target: %w", err)
 	}
 	logger.Printf("resolved SIP target host=%s selected_ip=%s remote_addr=%s", resolvedTarget.Hostname, resolvedTarget.RemoteIP.String(), resolvedTarget.RemoteAddr)
+	if cfg.Mode == "register" {
+		return runRegister(cfg, resolvedTarget, logger)
+	}
 
 	logger.Printf("load PCAP: %s", cfg.PCAP)
 	packets, linkType, err := pcapread.LoadPCAPWithLinkType(cfg.PCAP)
@@ -105,17 +108,9 @@ func Run(args []string) error {
 		return fmt.Errorf("build SDP offer: %w", err)
 	}
 
-	tlsConfig, err := loadTLSConfig(cfg)
+	client, err := createSIPClient(cfg, resolvedTarget, logger)
 	if err != nil {
-		return fmt.Errorf("configure SIP TLS: %w", err)
-	}
-	if cfg.TLSInsecure {
-		logger.Println("WARNING: SIP TLS certificate verification disabled by --tls-insecure")
-	}
-	logger.Printf("SIP transport=%s", cfg.Transport)
-	client, err := sipclient.NewClientWithTransport(cfg.LocalIPParsed, cfg.IPFamily, resolvedTarget, cfg.Username, cfg.Password, cfg.UA, sipclient.TransportOptions{Protocol: cfg.Transport, TLSConfig: tlsConfig})
-	if err != nil {
-		return fmt.Errorf("create SIP client: %w", err)
+		return err
 	}
 	defer client.Close()
 
@@ -143,6 +138,22 @@ func Run(args []string) error {
 		return runInbound(setup)
 	}
 	return runOutbound(setup)
+}
+
+func createSIPClient(cfg *config.Config, target netutil.ResolvedTarget, logger *log.Logger) (*sipclient.Client, error) {
+	tlsConfig, err := loadTLSConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("configure SIP TLS: %w", err)
+	}
+	if cfg.TLSInsecure {
+		logger.Println("WARNING: SIP TLS certificate verification disabled by --tls-insecure")
+	}
+	logger.Printf("SIP transport=%s", cfg.Transport)
+	client, err := sipclient.NewClientWithTransport(cfg.LocalIPParsed, cfg.IPFamily, target, cfg.Username, cfg.Password, cfg.UA, sipclient.TransportOptions{Protocol: cfg.Transport, TLSConfig: tlsConfig})
+	if err != nil {
+		return nil, fmt.Errorf("create SIP client: %w", err)
+	}
+	return client, nil
 }
 
 type runSetup struct {

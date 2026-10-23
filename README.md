@@ -1,11 +1,12 @@
 # sip-tester
 
-SIP call replay tester that orchestrates SIP signaling and RTP playback from a PCAP capture.
+SIP tester for registration checks and call replay with RTP playback from a PCAP capture.
 
-Supports two modes:
+Supports three modes:
 
 - `outbound` (default): initiates a call as UAC.
 - `inbound`: registers, answers one inbound INVITE as UAS, and replays RTP.
+- `register`: performs one REGISTER transaction and exits without making or answering calls.
 
 Both call modes support `--hangup-mode=local|remote` to choose who ends the call.
 
@@ -25,7 +26,7 @@ sip-tester \
 
 ## SIP signaling transport
 
-- `--transport udp|tcp|tls` selects the SIP signaling transport in both call modes. The default is `udp`.
+- `--transport udp|tcp|tls` selects the SIP signaling transport in all modes. The default is `udp`.
 - `--host` must include the listening port for the selected transport; for example, `pbx.example.com:5060` for TCP or `pbx.example.com:5061` for TLS.
 - TLS requires TLS 1.2 or newer and verifies the server certificate against system trust and the original hostname from `--host`.
 - `--tls-ca-file /path/to/ca.pem` adds PEM CA certificates to system trust, including a private CA used by a test server. Unreadable files and files without valid PEM certificates are rejected.
@@ -64,6 +65,26 @@ sip-tester \
 ```
 
 Omit `--tls-ca-file` when the server certificate is already trusted by the system.
+
+## Registration-only mode
+
+`--mode register` requires only `--caller`, `--host`, and `--local-ip`. It does not require `--callee`, `--pcap`, or an SSRC, and does not load media or bind RTP sockets. The signaling transport and TLS options described above also apply to this mode.
+
+```bash
+sip-tester \
+  --mode register \
+  --caller '<caller>' \
+  --host '<sip-host>:<port>' \
+  --local-ip '<local-ip>' \
+  --register-expires 0
+```
+
+- `--register-expires` accepts a nonnegative integer number of seconds and defaults to `0` in register mode. It does not change inbound mode's fixed 300-second registration request or outbound behavior.
+- The REGISTER uses a specific Contact generated from the caller identity and bound SIP socket. An expiry of `0` requests removal of only that Contact; it never sends wildcard Contact removal for other registrations.
+- A positive expiry requests a registration that remains at the server until its negotiated expiry. The tool exits without automatically unregistering it.
+- Provide both `--username` and `--password` when Digest authentication is required. The initial REGISTER is unauthenticated; a challenge can trigger at most one authenticated retry.
+- The response timeout is 15 seconds. A successful `200 OK` is reported and the process exits with code `0`; rejection, authentication failure, transport failure, or timeout returns a nonzero exit code.
+- There is no call handling, answer delay, or registered waiting period. Each execution performs one transaction, with no count/rate loop.
 
 ## Orchestration flow
 
@@ -114,7 +135,7 @@ The app runs this sequence:
 
 ## Mode-specific CLI semantics
 
-- `--mode` allowed values: `outbound|inbound` (default: `outbound`).
+- `--mode` allowed values: `outbound|inbound|register` (default: `outbound`).
 - `--hangup-mode` allowed values: `local|remote` (default: `local`), independent of call mode.
 - In `outbound` mode, `--callee` is required.
 - In `inbound` mode, `--callee` is optional (not required).
@@ -212,7 +233,7 @@ sip-tester \
 
 ## SIP authentication
 
-`sip-tester` supports optional SIP Digest authentication for outbound `INVITE` and inbound-mode `REGISTER`.
+`sip-tester` supports optional SIP Digest authentication for outbound `INVITE` and `REGISTER` in inbound and register modes.
 
 - Provide both `--username` and `--password` to enable authentication.
 - The client sends the initial request without auth.

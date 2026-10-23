@@ -6,6 +6,52 @@ import (
 	"time"
 )
 
+func TestParseArgsRegisterDoesNotRequireCallInputs(t *testing.T) {
+	for _, transport := range []string{"udp", "tcp", "tls"} {
+		t.Run(transport, func(t *testing.T) {
+			configuration, err := ParseArgs([]string{
+				"--mode", "register", "--caller", "1001", "--host", "pbx.example.com:5061",
+				"--local-ip", "127.0.0.1", "--transport", transport,
+			})
+			if err != nil {
+				t.Fatalf("register without callee, PCAP, or SSRC: %v", err)
+			}
+			if configuration.Mode != "register" || configuration.Caller != "sip:1001@pbx.example.com" || configuration.Transport != transport {
+				t.Fatalf("unexpected register configuration: mode=%q caller=%q transport=%q", configuration.Mode, configuration.Caller, configuration.Transport)
+			}
+		})
+	}
+}
+
+func TestParseArgsRegisterAcceptsNonnegativeExpiry(t *testing.T) {
+	for _, expiry := range []string{"0", "60"} {
+		t.Run(expiry, func(t *testing.T) {
+			_, err := ParseArgs([]string{
+				"--mode", "register", "--caller", "1001", "--host", "pbx.example.com:5060",
+				"--local-ip", "127.0.0.1", "--register-expires", expiry,
+				"--username", "1001", "--password", "test-secret",
+			})
+			if err != nil {
+				t.Fatalf("register expiry %s: %v", expiry, err)
+			}
+		})
+	}
+}
+
+func TestParseArgsRejectsInvalidRegisterExpiry(t *testing.T) {
+	for _, expiry := range []string{"-1", "1.5", "one"} {
+		t.Run(expiry, func(t *testing.T) {
+			_, err := ParseArgs([]string{
+				"--mode", "register", "--caller", "1001", "--host", "pbx.example.com:5060",
+				"--local-ip", "127.0.0.1", "--register-expires", expiry,
+			})
+			if err == nil || !strings.Contains(err.Error(), "register-expires") {
+				t.Fatalf("expiry %q: error=%v, want expiry validation error", expiry, err)
+			}
+		})
+	}
+}
+
 func TestParseArgsAcceptsSignalingTransports(t *testing.T) {
 	for _, transport := range []string{"udp", "tcp", "tls"} {
 		t.Run(transport, func(t *testing.T) {

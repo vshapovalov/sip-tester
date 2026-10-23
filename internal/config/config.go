@@ -34,6 +34,7 @@ type Config struct {
 	AnswerAfter              time.Duration
 	RejectAfter              time.Duration
 	RegisteredWait           time.Duration
+	RegisterExpires          int
 	EarlyMedia               bool
 	RequireEarlyVideoPackets int
 	RequireFinalVideoPackets int
@@ -77,8 +78,8 @@ func (c *Config) ValidateRequired() error {
 	if c.HangupMode != "local" && c.HangupMode != "remote" {
 		return fmt.Errorf("--hangup-mode must be one of: local, remote")
 	}
-	if c.Mode != "outbound" && c.Mode != "inbound" {
-		return fmt.Errorf("--mode must be one of: outbound, inbound")
+	if c.Mode != "outbound" && c.Mode != "inbound" && c.Mode != "register" {
+		return fmt.Errorf("--mode must be one of: outbound, inbound, register")
 	}
 	if c.CallerRaw == "" {
 		return fmt.Errorf("--caller is required")
@@ -92,14 +93,17 @@ func (c *Config) ValidateRequired() error {
 	if c.LocalIP == "" {
 		return fmt.Errorf("--local-ip is required")
 	}
-	if c.PCAP == "" {
+	if c.Mode != "register" && c.PCAP == "" {
 		return fmt.Errorf("--pcap is required")
 	}
-	if c.SSRCAudioRaw == "" && c.SSRCVideoRaw == "" {
+	if c.Mode != "register" && c.SSRCAudioRaw == "" && c.SSRCVideoRaw == "" {
 		return fmt.Errorf("at least one of --ssrc-audio or --ssrc-video must be provided")
 	}
 	if (c.Username == "") != (c.Password == "") {
 		return fmt.Errorf("--username and --password must be provided together")
+	}
+	if c.RegisterExpires < 0 {
+		return fmt.Errorf("--register-expires must not be negative")
 	}
 	if c.Mode == "inbound" && c.CancelAfter > 0 {
 		return fmt.Errorf("--cancel-after is only valid in outbound mode")
