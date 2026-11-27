@@ -21,7 +21,7 @@ func ParseArgs(args []string) (*config.Config, error) {
 	var answerAfterRaw string
 	var rejectAfterRaw string
 	var registeredWaitRaw string
-	fs.StringVar(&cfg.Mode, "mode", "outbound", "call mode: outbound|inbound")
+	fs.StringVar(&cfg.Mode, "mode", "outbound", "SIP mode: outbound|inbound|register")
 	fs.StringVar(&cfg.HangupMode, "hangup-mode", "local", "hangup initiator: local|remote (remote waits up to 15s after RTP replay)")
 	fs.StringVar(&cfg.UA, "ua", "sip-tester", "SIP User-Agent header value")
 	fs.StringVar(&cfg.CallerRaw, "caller", "", "caller SIP URI or user")
@@ -61,6 +61,7 @@ func ParseArgs(args []string) (*config.Config, error) {
 	fs.StringVar(&answerAfterRaw, "answer-after", "", "answer an inbound INVITE after this duration")
 	fs.StringVar(&rejectAfterRaw, "reject-after", "", "reject an inbound INVITE with 486 Busy Here after this duration")
 	fs.StringVar(&registeredWaitRaw, "registered-wait", "", "remain registered without answering for this duration")
+	fs.IntVar(&cfg.RegisterExpires, "register-expires", 0, "REGISTER expiry in seconds for register mode (0 removes only this client's Contact)")
 	fs.BoolVar(&cfg.EarlyMedia, "early-media", false, "send 183 Session Progress with SDP before answering an inbound INVITE")
 	fs.IntVar(&cfg.RequireEarlyVideoPackets, "require-early-video-packets", 0, "require this many video RTP packets before answering an inbound INVITE")
 	fs.IntVar(&cfg.RequireFinalVideoPackets, "require-final-video-packets", 0, "require this many new video RTP packets after answering an inbound INVITE")
